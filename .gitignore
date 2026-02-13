@@ -6,3 +6,13 @@ venv/
 *.egg-info/
 dist/
 build/
+.claude/
+logo_b64.txt
+logo_crop*.png
+logo_neg*.png
+logo_negativo.png
+logo_positivo_crop.png
+logo_tag_clean.png
+logo_tag_transparent.png
+page*.png
+nul

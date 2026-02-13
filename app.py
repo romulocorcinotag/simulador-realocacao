@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from io import BytesIO
 import re
 import os
+import base64
 
 # ─────────────────────────────────────────────────────────
 # CONFIG
@@ -269,6 +270,22 @@ def add_business_days(start_date, num_days, count_type="Úteis"):
         return start_date + timedelta(days=num_days)
 
 
+def subtract_business_days(end_date, num_days, count_type="Úteis"):
+    """Subtract business or calendar days from a date (inverse of add_business_days)."""
+    if num_days == 0:
+        return end_date
+    if count_type == "Úteis":
+        current = end_date
+        subtracted = 0
+        while subtracted < num_days:
+            current -= timedelta(days=1)
+            if current.weekday() < 5:
+                subtracted += 1
+        return current
+    else:
+        return end_date - timedelta(days=num_days)
+
+
 def is_stock_ticker(name):
     """Check if the asset name looks like a B3 stock/ETF ticker."""
     if not name:
@@ -310,11 +327,49 @@ def match_fund_liquidation(fund_name, fund_code, liquid_df):
     return None
 
 
+def identify_cash_funds(ativos_df, liquid_df):
+    """
+    Identify funds in the portfolio that are cash-equivalent.
+    A fund is cash-equivalent if total D+ (Conversão Resgate + Liquid. Resgate) <= 1 business day.
+    Returns set of fund codes (str) and a list of dicts with details.
+    """
+    cod_col = find_col(ativos_df, "CÓD. ATIVO", "COD. ATIVO")
+    cash_codes = set()
+    cash_details = []
+    for _, row in ativos_df.iterrows():
+        code = str(row[cod_col]) if cod_col else ""
+        name = str(row.get("ATIVO", ""))
+        fin = float(row.get("FINANCEIRO", 0))
+        liq_info = match_fund_liquidation(name, code, liquid_df)
+        if liq_info is not None:
+            conv = int(liq_info.get("Conversão Resgate", 0))
+            liq = int(liq_info.get("Liquid. Resgate", 0))
+            total_d = conv + liq
+            if total_d <= 1:
+                cash_codes.add(code)
+                cash_details.append({
+                    "Ativo": name[:50], "Código": code,
+                    "D+ Conv.": conv, "D+ Liq.": liq,
+                    "Total D+": total_d, "Financeiro (R$)": fin,
+                })
+        else:
+            # Fallback: known SELIC/treasury names
+            name_up = name.upper()
+            if any(kw in name_up for kw in ["TESOURO SELIC", "SELIC SIMPLES"]):
+                cash_codes.add(code)
+                cash_details.append({
+                    "Ativo": name[:50], "Código": code,
+                    "D+ Conv.": 0, "D+ Liq.": 1,
+                    "Total D+": 1, "Financeiro (R$)": fin,
+                })
+    return cash_codes, cash_details
+
+
 def get_portfolio_context():
     """
     Centralized helper to get portfolio data from session state.
     Returns dict with keys: ativos, carteira, caixa_initial, pl_total,
-    provision_movs, new_movs, all_movements, cod_col.
+    provision_movs, new_movs, all_movements, cod_col, cash_fund_codes, cash_details.
     Returns None if no portfolio loaded.
     """
     if not st.session_state.get("portfolio_loaded"):
@@ -331,6 +386,7 @@ def get_portfolio_context():
     new_movs = st.session_state.get("new_movements", [])
     all_movements = provision_movs + new_movs
     cod_col = find_col(ativos, "CÓD. ATIVO", "COD. ATIVO")
+    cash_fund_codes, cash_details = identify_cash_funds(ativos, load_liquidation_data())
     return {
         "ativos": ativos,
         "carteira": carteira,
@@ -340,6 +396,8 @@ def get_portfolio_context():
         "new_movs": new_movs,
         "all_movements": all_movements,
         "cod_col": cod_col,
+        "cash_fund_codes": cash_fund_codes,
+        "cash_details": cash_details,
     }
 
 
@@ -498,6 +556,252 @@ def apply_movement(op, value, fund_code, positions, caixa):
     elif op == "Crédito (Provisão)":
         caixa += value
     return caixa
+
+
+# ─────────────────────────────────────────────────────────
+# CASH FLOW TIMELINE & REQUEST DATE SUGGESTIONS
+# ─────────────────────────────────────────────────────────
+
+def build_cash_flow_timeline(caixa_initial, ativos_df, all_movements, cash_fund_codes):
+    """
+    Build day-by-day cash flow timeline.
+    Cash efetivo = caixa_initial + sum of cash-equivalent fund positions.
+    Returns (df_timeline, initial_effective_cash).
+    """
+    cod_col = find_col(ativos_df, "CÓD. ATIVO", "COD. ATIVO")
+
+    # Compute initial effective cash (CAIXA + cash fund positions)
+    cash_fund_total = 0.0
+    for _, row in ativos_df.iterrows():
+        code = str(row[cod_col]) if cod_col else ""
+        if code in cash_fund_codes:
+            cash_fund_total += float(row.get("FINANCEIRO", 0))
+    initial_effective_cash = caixa_initial + cash_fund_total
+
+    if not all_movements:
+        return pd.DataFrame(), initial_effective_cash
+
+    # Filter movements with valid liquidation dates
+    valid_movs = [m for m in all_movements if pd.notna(m.get("liquidation_date"))]
+    if not valid_movs:
+        return pd.DataFrame(), initial_effective_cash
+
+    today = pd.Timestamp(datetime.today().date())
+    last_date = max(pd.Timestamp(m["liquidation_date"]) for m in valid_movs)
+    if last_date < today:
+        last_date = today + timedelta(days=5)
+
+    # Build daily event map: {date: [(description, amount_on_cash)]}
+    events = {}
+    for m in valid_movs:
+        liq_date = pd.Timestamp(m["liquidation_date"])
+        if liq_date < today:
+            continue  # Past movements are already in initial balances
+        fund_code = str(m.get("fund_code", ""))
+        op = m["operation"]
+        value = m["value"]
+        fund_name = m.get("fund_name", "")[:40]
+        is_cash_fund = fund_code in cash_fund_codes
+
+        # Determine cash impact
+        cash_impact = 0.0
+        if op == "Resgate Passivo":
+            cash_impact = -value  # Investors withdrawing
+            desc = f"⬇️ Resgate Passivo: -R$ {value:,.0f}"
+        elif op in ("Resgate (Cotizando)", "Resgate (Provisão)", "Resgate"):
+            if is_cash_fund:
+                cash_impact = 0.0  # Cash-to-cash: net zero
+                desc = f"↔️ Resgate caixa ({fund_name}): R$ {value:,.0f} (neutro)"
+            else:
+                cash_impact = +value  # Non-cash fund → caixa
+                desc = f"⬆️ Resgate {fund_name}: +R$ {value:,.0f}"
+        elif "Aplicação" in op:
+            if is_cash_fund:
+                cash_impact = 0.0  # Caixa-to-cash fund: net zero
+                desc = f"↔️ Aplicação caixa ({fund_name}): R$ {value:,.0f} (neutro)"
+            else:
+                cash_impact = -value  # Caixa → non-cash fund
+                desc = f"⬇️ Aplicação {fund_name}: -R$ {value:,.0f}"
+        elif op == "Débito/Passivo":
+            cash_impact = -value
+            desc = f"⬇️ Débito: -R$ {value:,.0f}"
+        elif op == "Crédito (Provisão)":
+            cash_impact = +value
+            desc = f"⬆️ Crédito: +R$ {value:,.0f}"
+        else:
+            desc = f"❓ {op}: R$ {value:,.0f}"
+
+        if liq_date not in events:
+            events[liq_date] = []
+        events[liq_date].append((desc, cash_impact))
+
+    # Generate timeline (business days only)
+    rows = []
+    running_balance = initial_effective_cash
+    current = today
+    while current <= last_date + timedelta(days=3):
+        if current.weekday() < 5:  # Business days only
+            day_events = events.get(current, [])
+            inflows = sum(amt for _, amt in day_events if amt > 0)
+            outflows = sum(abs(amt) for _, amt in day_events if amt < 0)
+            net = inflows - outflows
+            running_balance += net
+            details = " | ".join(d for d, _ in day_events) if day_events else ""
+            rows.append({
+                "Data": current,
+                "Entradas (R$)": inflows,
+                "Saídas (R$)": outflows,
+                "Líquido (R$)": net,
+                "Saldo (R$)": running_balance,
+                "Detalhes": details,
+                "Negativo": running_balance < 0,
+                "Tem Evento": len(day_events) > 0,
+            })
+        current += timedelta(days=1)
+
+    df_timeline = pd.DataFrame(rows)
+    return df_timeline, initial_effective_cash
+
+
+def suggest_request_dates(all_movements, liquid_df, cash_fund_codes, caixa_initial, ativos_df):
+    """
+    Analyze movements and suggest optimal request dates so effective cash never goes negative.
+    Returns (suggestions, negative_dates, df_timeline, initial_cash).
+    """
+    df_timeline, initial_cash = build_cash_flow_timeline(
+        caixa_initial, ativos_df, all_movements, cash_fund_codes
+    )
+
+    if df_timeline.empty:
+        return [], [], df_timeline, initial_cash
+
+    # Identify negative dates
+    neg_rows = df_timeline[df_timeline["Negativo"]].copy()
+    negative_dates = []
+    for _, row in neg_rows.iterrows():
+        negative_dates.append({
+            "date": row["Data"],
+            "balance": row["Saldo (R$)"],
+            "shortfall": abs(row["Saldo (R$)"]),
+        })
+
+    if not negative_dates:
+        return [], [], df_timeline, initial_cash
+
+    today = pd.Timestamp(datetime.today().date())
+
+    # Separate outflows and inflows
+    outflows = []  # Movements that decrease cash
+    inflows = []   # Movements that could be adjusted (non-cash resgates)
+    for m in all_movements:
+        if pd.isna(m.get("liquidation_date")):
+            continue
+        liq_date = pd.Timestamp(m["liquidation_date"])
+        if liq_date < today:
+            continue
+        fund_code = str(m.get("fund_code", ""))
+        op = m["operation"]
+        is_cash_fund = fund_code in cash_fund_codes
+
+        if op == "Resgate Passivo" or (op == "Débito/Passivo"):
+            outflows.append(m)
+        elif "Aplicação" in op and not is_cash_fund:
+            outflows.append(m)
+        elif op in ("Resgate (Cotizando)", "Resgate (Provisão)", "Resgate") and not is_cash_fund:
+            inflows.append(m)
+
+    # Sort outflows by liquidation_date
+    outflows.sort(key=lambda x: pd.Timestamp(x["liquidation_date"]))
+
+    suggestions = []
+    for outflow in outflows:
+        out_date = pd.Timestamp(outflow["liquidation_date"])
+        out_value = outflow["value"]
+
+        # Check if cash is negative around this outflow date
+        is_problem_date = any(
+            nd["date"] == out_date or
+            (nd["date"] >= out_date - timedelta(days=3) and nd["date"] <= out_date + timedelta(days=3))
+            for nd in negative_dates
+        )
+        if not is_problem_date:
+            continue
+
+        # Find inflow movements that could cover this outflow
+        for inflow in inflows:
+            in_date = pd.Timestamp(inflow["liquidation_date"])
+            fund_name = inflow.get("fund_name", "")
+            fund_code = str(inflow.get("fund_code", ""))
+
+            # If inflow settles AFTER the outflow, we need to suggest earlier request
+            if in_date > out_date:
+                liq_info = match_fund_liquidation(fund_name, fund_code, liquid_df)
+                if liq_info is not None:
+                    conv = int(liq_info.get("Conversão Resgate", 0))
+                    liq = int(liq_info.get("Liquid. Resgate", 0))
+                    count_type = str(liq_info.get("Contagem Resgate", "Úteis"))
+                    if count_type not in ["Úteis", "Corridos"]:
+                        count_type = "Úteis"
+                    total_d = conv + liq
+
+                    # Suggested request date = outflow_date - total_d business days
+                    suggested_req = subtract_business_days(out_date, total_d, count_type)
+                    current_req = pd.Timestamp(inflow.get("request_date", today))
+
+                    if suggested_req < today:
+                        reason = (
+                            f"⚠️ IMPOSSÍVEL: precisaria solicitar em "
+                            f"{suggested_req.strftime('%d/%m/%Y')} (passado). "
+                            f"Aumente o caixa ou atrase a saída."
+                        )
+                    elif suggested_req < current_req:
+                        reason = (
+                            f"Antecipar para {suggested_req.strftime('%d/%m/%Y')} "
+                            f"(D+{total_d} {count_type}) para liquidar até "
+                            f"{out_date.strftime('%d/%m/%Y')}"
+                        )
+                    else:
+                        continue  # Already good
+
+                    suggestions.append({
+                        "Fundo": fund_name[:45],
+                        "Código": fund_code,
+                        "Operação": inflow["operation"],
+                        "Valor (R$)": inflow["value"],
+                        "Data Atual": current_req.strftime("%d/%m/%Y"),
+                        "Data Sugerida": suggested_req.strftime("%d/%m/%Y") if suggested_req >= today else f"{suggested_req.strftime('%d/%m/%Y')} ⚠️",
+                        "D+": f"D+{total_d} ({count_type})",
+                        "Cobre Saída Em": out_date.strftime("%d/%m/%Y"),
+                        "Motivo": reason,
+                        "is_impossible": suggested_req < today,
+                    })
+
+    # Also suggest: for each outflow without a matching inflow, flag it
+    for outflow in outflows:
+        out_date = pd.Timestamp(outflow["liquidation_date"])
+        is_problem = any(
+            nd["date"] == out_date or
+            (nd["date"] >= out_date - timedelta(days=1) and nd["date"] <= out_date)
+            for nd in negative_dates
+        )
+        if is_problem:
+            # Check if any suggestion already covers this date
+            already_covered = any(s["Cobre Saída Em"] == out_date.strftime("%d/%m/%Y") for s in suggestions)
+            if not already_covered:
+                suggestions.append({
+                    "Fundo": outflow.get("fund_name", "")[:45],
+                    "Código": str(outflow.get("fund_code", "")),
+                    "Operação": outflow["operation"],
+                    "Valor (R$)": outflow["value"],
+                    "Data Atual": pd.Timestamp(outflow.get("request_date", today)).strftime("%d/%m/%Y"),
+                    "Data Sugerida": "—",
+                    "D+": "—",
+                    "Cobre Saída Em": out_date.strftime("%d/%m/%Y"),
+                    "Motivo": "⚠️ Saída sem entrada correspondente — garanta caixa suficiente",
+                    "is_impossible": True,
+                })
+
+    return suggestions, negative_dates, df_timeline, initial_cash
 
 
 # ─────────────────────────────────────────────────────────
@@ -1075,18 +1379,35 @@ if "model_loaded" not in st.session_state:
 # ═══════════════════════════════════════════════════════════
 
 with st.sidebar:
-    st.markdown(
-        f"""<div style='text-align:center; padding: 8px 0 16px 0;'>
-        <div style='font-size:1.5rem; font-weight:700; color:{TAG["offwhite"]}; letter-spacing:-0.03em;'>
-        TAG</div>
-        <div style='font-size:0.7rem; text-transform:uppercase; letter-spacing:0.15em; color:{TAG["text_muted"]}; margin-top:-4px;'>
-        Investimentos</div>
-        <div style='width:40px; height:2px; background:{TAG["laranja"]}; margin:10px auto 0;'></div>
-        <div style='font-size:0.75rem; color:{TAG["laranja"]}; margin-top:8px; font-weight:500;'>
-        Simulador de Realocação</div>
-        </div>""",
-        unsafe_allow_html=True,
-    )
+    # Logo TAG from brand guide (loaded from PNG file)
+    _logo_path = os.path.join(os.path.dirname(__file__), "logo_sidebar.png")
+    if os.path.exists(_logo_path):
+        with open(_logo_path, "rb") as _f:
+            _logo_b64 = base64.b64encode(_f.read()).decode()
+        st.markdown(
+            f"""<div style='text-align:center; padding: 12px 0 8px 0;'>
+            <img src='data:image/png;base64,{_logo_b64}'
+                 alt='TAG Investimentos'
+                 style='width:160px; height:auto; margin-bottom:6px;'/>
+            <div style='width:40px; height:2px; background:{TAG["laranja"]}; margin:6px auto 0;'></div>
+            <div style='font-size:0.75rem; color:{TAG["laranja"]}; margin-top:8px; font-weight:500;'>
+            Simulador de Realocação</div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f"""<div style='text-align:center; padding: 8px 0 16px 0;'>
+            <div style='font-size:1.5rem; font-weight:700; color:{TAG["offwhite"]}; letter-spacing:-0.03em;'>
+            TAG</div>
+            <div style='font-size:0.7rem; text-transform:uppercase; letter-spacing:0.15em; color:{TAG["text_muted"]}; margin-top:-4px;'>
+            Investimentos</div>
+            <div style='width:40px; height:2px; background:{TAG["laranja"]}; margin:10px auto 0;'></div>
+            <div style='font-size:0.75rem; color:{TAG["laranja"]}; margin-top:8px; font-weight:500;'>
+            Simulador de Realocação</div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
     st.divider()
 
     page = st.radio(
@@ -1437,6 +1758,159 @@ elif page == "📊 Projeção da Carteira":
                     fig_tl.update_layout(**PLOTLY_LAYOUT, height=max(300, len(timeline_data) * 40), yaxis_title="")
                     st.plotly_chart(fig_tl, use_container_width=True)
 
+                # ── CASH FLOW TIMELINE ──
+                st.divider()
+                st.subheader("📈 Fluxo de Caixa Diário")
+                st.caption(
+                    "Projeção dia-a-dia do caixa efetivo (CAIXA + fundos D+0/D+1). "
+                    "O saldo nunca pode ficar negativo."
+                )
+
+                cash_fund_codes = ctx.get("cash_fund_codes", set())
+                cash_details = ctx.get("cash_details", [])
+
+                # A. Cash fund identification
+                with st.expander("💰 Fundos Considerados como Caixa (D+0/D+1)", expanded=False):
+                    if cash_details:
+                        df_cash = pd.DataFrame(cash_details)
+                        total_cash_funds = df_cash["Financeiro (R$)"].sum()
+                        st.metric("Caixa Efetivo Inicial",
+                                  f"R$ {caixa_initial + total_cash_funds:,.0f}",
+                                  f"CAIXA R$ {caixa_initial:,.0f} + Fundos-Caixa R$ {total_cash_funds:,.0f}")
+                        st.dataframe(
+                            df_cash.style.format({"Financeiro (R$)": "R$ {:,.0f}"}),
+                            use_container_width=True, hide_index=True,
+                        )
+                    else:
+                        st.info("Nenhum fundo D+0/D+1 encontrado na carteira.")
+                        st.metric("Caixa Efetivo Inicial", f"R$ {caixa_initial:,.0f}")
+
+                # B. Run cash flow analysis
+                suggestions, negative_dates, df_timeline, initial_cash = suggest_request_dates(
+                    all_movements, liquid_df, cash_fund_codes, caixa_initial, ativos
+                )
+
+                # C. Alerts
+                if negative_dates:
+                    st.error(
+                        f"🚨 **ATENÇÃO**: Caixa ficará negativo em "
+                        f"**{len(negative_dates)} data(s)**! O fundo não pode operar assim."
+                    )
+                    for nd in negative_dates[:5]:  # Show first 5
+                        st.warning(
+                            f"📅 **{nd['date'].strftime('%d/%m/%Y')}** — "
+                            f"Saldo: **R$ {nd['balance']:,.0f}** — "
+                            f"Déficit: **R$ {nd['shortfall']:,.0f}**"
+                        )
+                    if len(negative_dates) > 5:
+                        st.caption(f"... e mais {len(negative_dates) - 5} datas com saldo negativo.")
+                else:
+                    if not df_timeline.empty:
+                        st.success("✅ **Fluxo de caixa positivo** em todas as datas. Nenhum risco de caixa negativo.")
+
+                # D. Chart
+                if not df_timeline.empty:
+                    fig_cf = go.Figure()
+
+                    # Running balance area
+                    pos_mask = df_timeline["Saldo (R$)"] >= 0
+                    neg_mask = df_timeline["Saldo (R$)"] < 0
+
+                    fig_cf.add_trace(go.Scatter(
+                        x=df_timeline["Data"], y=df_timeline["Saldo (R$)"],
+                        fill="tozeroy", mode="lines+markers",
+                        name="Saldo Caixa",
+                        line=dict(color=TAG["chart"][2], width=2),
+                        fillcolor="rgba(107,222,151,0.12)",
+                        marker=dict(size=4),
+                    ))
+
+                    # Highlight negative areas
+                    if neg_mask.any():
+                        neg_data = df_timeline[neg_mask]
+                        fig_cf.add_trace(go.Scatter(
+                            x=neg_data["Data"], y=neg_data["Saldo (R$)"],
+                            fill="tozeroy", mode="markers",
+                            name="Déficit",
+                            line=dict(color=TAG["chart"][4]),
+                            fillcolor="rgba(237,90,110,0.25)",
+                            marker=dict(size=8, color=TAG["chart"][4], symbol="x"),
+                        ))
+
+                    # Inflow/outflow bars (only on event days)
+                    event_days = df_timeline[df_timeline["Tem Evento"]]
+                    if not event_days.empty:
+                        fig_cf.add_trace(go.Bar(
+                            x=event_days["Data"], y=event_days["Entradas (R$)"],
+                            name="Entradas", marker_color=TAG["chart"][2], opacity=0.5,
+                        ))
+                        fig_cf.add_trace(go.Bar(
+                            x=event_days["Data"], y=-event_days["Saídas (R$)"],
+                            name="Saídas", marker_color=TAG["chart"][4], opacity=0.5,
+                        ))
+
+                    # Zero line
+                    fig_cf.add_hline(
+                        y=0, line_dash="dash", line_color=TAG["chart"][4],
+                        line_width=2,
+                        annotation_text="Zero — Limite Mínimo",
+                        annotation_position="top right",
+                        annotation_font_color=TAG["chart"][4],
+                    )
+
+                    fig_cf.update_layout(
+                        **PLOTLY_LAYOUT, height=450, barmode="overlay",
+                        yaxis_title="R$", xaxis_title="Data",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    )
+                    st.plotly_chart(fig_cf, use_container_width=True)
+
+                # E. Suggestions table
+                if suggestions:
+                    st.divider()
+                    st.subheader("📋 Sugestão de Datas de Solicitação")
+                    st.caption(
+                        "Para evitar saldo negativo, solicite os resgates nas datas abaixo. "
+                        "O sistema calcula retroativamente com base no D+ de cada fundo."
+                    )
+                    df_sug = pd.DataFrame(suggestions)
+                    display_cols = [
+                        "Fundo", "Código", "Operação", "Valor (R$)",
+                        "Data Atual", "Data Sugerida", "D+",
+                        "Cobre Saída Em", "Motivo",
+                    ]
+                    available_cols = [c for c in display_cols if c in df_sug.columns]
+                    st.dataframe(
+                        df_sug[available_cols].style.format({"Valor (R$)": "R$ {:,.0f}"}).apply(
+                            lambda row: [
+                                "background-color: rgba(237,90,110,0.15)"
+                                if row.get("is_impossible", False) else ""
+                            ] * len(row), axis=1
+                        ) if "is_impossible" in df_sug.columns else df_sug[available_cols].style.format({"Valor (R$)": "R$ {:,.0f}"}),
+                        use_container_width=True, hide_index=True,
+                    )
+
+                # F. Detailed timeline table
+                if not df_timeline.empty:
+                    with st.expander("📊 Detalhes do Fluxo de Caixa Diário", expanded=False):
+                        display_tl = df_timeline[df_timeline["Tem Evento"] | (df_timeline.index == 0)].copy()
+                        if display_tl.empty:
+                            display_tl = df_timeline.head(20)
+                        display_tl["Data"] = display_tl["Data"].dt.strftime("%d/%m/%Y")
+                        st.dataframe(
+                            display_tl[["Data", "Entradas (R$)", "Saídas (R$)", "Líquido (R$)", "Saldo (R$)", "Detalhes"]].style.format({
+                                "Entradas (R$)": "R$ {:,.0f}",
+                                "Saídas (R$)": "R$ {:,.0f}",
+                                "Líquido (R$)": "R$ {:,.0f}",
+                                "Saldo (R$)": "R$ {:,.0f}",
+                            }).apply(
+                                lambda row: [
+                                    "background-color: rgba(237,90,110,0.15)" if row["Saldo (R$)"] < 0 else ""
+                                ] * len(row), axis=1
+                            ),
+                            use_container_width=True, hide_index=True, height=400,
+                        )
+
                 # Export
                 st.divider()
                 excel_data = export_to_excel(df_fin, df_pct, df_mov, carteira)
@@ -1611,6 +2085,83 @@ elif page == "🎯 Carteira Modelo":
                     fig_cmp.update_layout(**PLOTLY_LAYOUT, barmode="group", height=400,
                                           xaxis_tickangle=-30, yaxis_title="% PL")
                     st.plotly_chart(fig_cmp, use_container_width=True)
+
+            # ── CASH FLOW for combined movements ──
+            st.divider()
+            st.subheader("📈 Fluxo de Caixa (Provisões + Plano)")
+            st.caption(
+                "Verifica se o caixa efetivo ficará negativo ao longo do tempo, "
+                "considerando todos os movimentos do plano."
+            )
+
+            cash_fund_codes = ctx.get("cash_fund_codes", set())
+            sug_plan, neg_plan, tl_plan, init_plan = suggest_request_dates(
+                combined_movements, liquid_df, cash_fund_codes, caixa_initial, ativos
+            )
+
+            if neg_plan:
+                st.error(
+                    f"🚨 **ATENÇÃO**: Com este plano, o caixa ficará negativo em "
+                    f"**{len(neg_plan)} data(s)**!"
+                )
+                for nd in neg_plan[:5]:
+                    st.warning(
+                        f"📅 **{nd['date'].strftime('%d/%m/%Y')}** — "
+                        f"Saldo: **R$ {nd['balance']:,.0f}** — "
+                        f"Déficit: **R$ {nd['shortfall']:,.0f}**"
+                    )
+            else:
+                if not tl_plan.empty:
+                    st.success("✅ **Plano viável!** Caixa positivo em todas as datas.")
+
+            if not tl_plan.empty:
+                fig_plan = go.Figure()
+                fig_plan.add_trace(go.Scatter(
+                    x=tl_plan["Data"], y=tl_plan["Saldo (R$)"],
+                    fill="tozeroy", mode="lines+markers",
+                    name="Saldo Caixa",
+                    line=dict(color=TAG["chart"][2], width=2),
+                    fillcolor="rgba(107,222,151,0.12)",
+                    marker=dict(size=4),
+                ))
+                neg_m = tl_plan["Saldo (R$)"] < 0
+                if neg_m.any():
+                    fig_plan.add_trace(go.Scatter(
+                        x=tl_plan.loc[neg_m, "Data"], y=tl_plan.loc[neg_m, "Saldo (R$)"],
+                        fill="tozeroy", mode="markers",
+                        name="Déficit",
+                        line=dict(color=TAG["chart"][4]),
+                        fillcolor="rgba(237,90,110,0.25)",
+                        marker=dict(size=8, color=TAG["chart"][4], symbol="x"),
+                    ))
+                event_d = tl_plan[tl_plan["Tem Evento"]]
+                if not event_d.empty:
+                    fig_plan.add_trace(go.Bar(
+                        x=event_d["Data"], y=event_d["Entradas (R$)"],
+                        name="Entradas", marker_color=TAG["chart"][2], opacity=0.5,
+                    ))
+                    fig_plan.add_trace(go.Bar(
+                        x=event_d["Data"], y=-event_d["Saídas (R$)"],
+                        name="Saídas", marker_color=TAG["chart"][4], opacity=0.5,
+                    ))
+                fig_plan.add_hline(y=0, line_dash="dash", line_color=TAG["chart"][4], line_width=2)
+                fig_plan.update_layout(
+                    **PLOTLY_LAYOUT, height=400, barmode="overlay",
+                    yaxis_title="R$", xaxis_title="Data",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                )
+                st.plotly_chart(fig_plan, use_container_width=True)
+
+            if sug_plan:
+                st.subheader("📋 Sugestão de Datas de Solicitação")
+                df_sug_p = pd.DataFrame(sug_plan)
+                disp_cols = ["Fundo", "Código", "Operação", "Valor (R$)",
+                             "Data Atual", "Data Sugerida", "D+", "Cobre Saída Em", "Motivo"]
+                avail_cols = [c for c in disp_cols if c in df_sug_p.columns]
+                st.dataframe(
+                    df_sug_p[avail_cols].style.format({"Valor (R$)": "R$ {:,.0f}"}),
+                    use_container_width=True, hide_index=True,
+                )
 
             # Export
             st.divider()
