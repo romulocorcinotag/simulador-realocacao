@@ -43,7 +43,7 @@ def load_liquidation_data():
 
 
 def find_col(df, *candidates):
-    """Find the first matching column from candidates."""
+    """Find the first matching column from candidates (exact → partial)."""
     for c in candidates:
         if c in df.columns:
             return c
@@ -69,7 +69,6 @@ def parse_portfolio_file(uploaded_file):
             sheet_map["provisoes"] = name
         elif "BOLETA" in name_upper:
             sheet_map["boletas"] = name
-
     for key in sheet_map:
         sheets[key] = pd.read_excel(xl, sheet_name=sheet_map[key])
     return sheets
@@ -132,6 +131,43 @@ def match_fund_liquidation(fund_name, fund_code, liquid_df):
     return None
 
 
+def get_portfolio_context():
+    """
+    Centralized helper to get portfolio data from session state.
+    Returns dict with keys: ativos, carteira, caixa_initial, pl_total,
+    provision_movs, new_movs, all_movements, cod_col.
+    Returns None if no portfolio loaded.
+    """
+    if not st.session_state.get("portfolio_loaded"):
+        return None
+    sheets = st.session_state.portfolio_sheets
+    ativos = sheets["ativos"]
+    carteira = sheets.get("carteira")
+    caixa_initial = 0.0
+    pl_total = 0.0
+    if carteira is not None and not carteira.empty:
+        caixa_initial = float(carteira.iloc[0].get("CAIXA", 0))
+        pl_total = float(carteira.iloc[0].get("PL PROJETADO", carteira.iloc[0].get("PL FECHAMENTO", 0)))
+    provision_movs = st.session_state.get("provision_movements", [])
+    new_movs = st.session_state.get("new_movements", [])
+    all_movements = provision_movs + new_movs
+    cod_col = find_col(ativos, "CÓD. ATIVO", "COD. ATIVO")
+    return {
+        "ativos": ativos,
+        "carteira": carteira,
+        "caixa_initial": caixa_initial,
+        "pl_total": pl_total,
+        "provision_movs": provision_movs,
+        "new_movs": new_movs,
+        "all_movements": all_movements,
+        "cod_col": cod_col,
+    }
+
+
+# ─────────────────────────────────────────────────────────
+# PROVISION EXTRACTION
+# ─────────────────────────────────────────────────────────
+
 def extract_provisions_as_movements(provisoes_df, ativos_df):
     """
     Extract provisions from the portfolio file and convert them to movements.
@@ -148,7 +184,7 @@ def extract_provisions_as_movements(provisoes_df, ativos_df):
        → Operação: "Resgate Passivo"
 
     3. Outros débitos/créditos (taxas, IR, etc.)
-       → Operação: "Débito/Passivo" ou "Crédito"
+       → Operação: "Débito/Passivo" ou "Crédito (Provisão)"
     """
     movements = []
     if provisoes_df is None or provisoes_df.empty:
@@ -184,12 +220,12 @@ def extract_provisions_as_movements(provisoes_df, ativos_df):
 
         desc_upper = desc.upper()
 
-        # Try to extract fund code from description like "(1103)" or "(394)"
+        # Extract fund code from description like "(1103)" or "(394)"
         code_match = re.search(r'\((\d+)\)', desc)
         fund_code = code_match.group(1) if code_match else None
         fund_name = ""
 
-        # Try to match fund code to an asset in the portfolio
+        # Match fund code to an asset in the portfolio
         if fund_code and ativos_df is not None and cod_col:
             asset_match = ativos_df[ativos_df[cod_col].astype(str) == fund_code]
             if not asset_match.empty:
@@ -197,26 +233,15 @@ def extract_provisions_as_movements(provisoes_df, ativos_df):
 
         # ── Classify provision type ──
         if "MOVIMENTAÇÃO DE COTAS" in desc_upper or "MOVIMENTACAO DE COTAS" in desc_upper:
-            # Type 1: Resgate de ativo já cotizando
-            # "Provisão de Crédito por movimentação de Cotas (1360)"
-            # Positive value = cash incoming from fund redemption in progress
             op_type = "Resgate (Cotizando)"
             source = "provisao_resgate_ativo"
-
         elif "MOVIMENTO CARTEIRA" in desc_upper or "MOV. CARTEIRA" in desc_upper or "MOV CARTEIRA" in desc_upper:
-            # Type 2: Resgate de passivo = investidores do fundo resgatando
-            # "Débito referente a Movimento Carteira"
-            # Negative value = cash leaving the fund (PL shrinks)
             op_type = "Resgate Passivo"
             source = "provisao_resgate_passivo"
-
         elif valor > 0:
-            # Other positive: generic credit
             op_type = "Crédito (Provisão)"
             source = "provisao_credito"
-
         else:
-            # Other negative: generic debit (tax, fees, etc.)
             op_type = "Débito/Passivo"
             source = "provisao_debito"
 
@@ -233,6 +258,10 @@ def extract_provisions_as_movements(provisoes_df, ativos_df):
 
     return movements
 
+
+# ─────────────────────────────────────────────────────────
+# LIQUIDATION DATE COMPUTATION
+# ─────────────────────────────────────────────────────────
 
 def compute_liquidation_date_for_new_movement(mov, liquid_df):
     """Compute liquidation date for a manually-added movement."""
@@ -262,39 +291,63 @@ def compute_liquidation_date_for_new_movement(mov, liquid_df):
         return request_date, "N/A", False
 
 
+# ─────────────────────────────────────────────────────────
+# APPLY MOVEMENTS (single source of truth)
+# ─────────────────────────────────────────────────────────
+
+def apply_movement(op, value, fund_code, positions, caixa):
+    """
+    Apply a single movement to positions dict and caixa.
+    Returns updated caixa. Mutates positions in place.
+    Single source of truth for movement logic.
+    """
+    if op == "Resgate Passivo":
+        # Investidores resgatando: sai do PL inteiro (caixa diminui)
+        caixa -= value
+    elif op in ("Resgate (Cotizando)", "Resgate (Provisão)", "Resgate"):
+        # Resgate de ativo: subtrai do fundo, entra no caixa
+        if fund_code and fund_code in positions:
+            positions[fund_code]["financeiro"] -= value
+        caixa += value
+    elif "Aplicação" in op:
+        # Aplicação: entra no fundo, sai do caixa
+        if fund_code and fund_code in positions:
+            positions[fund_code]["financeiro"] += value
+        caixa -= value
+    elif op == "Débito/Passivo":
+        caixa -= value
+    elif op == "Crédito (Provisão)":
+        caixa += value
+    return caixa
+
+
+# ─────────────────────────────────────────────────────────
+# EVOLUTION TABLE
+# ─────────────────────────────────────────────────────────
+
 def build_evolution_table(ativos_df, all_movements, caixa_initial):
     """
-    Build the main evolution table: rows=assets, columns=dates.
-    Each cell shows the financial position of that asset on that date.
-    Includes Caixa row that receives/pays cash from movements.
+    Build evolution table: rows=assets, columns=dates.
+    Shows how portfolio changes at each liquidation date.
     """
     cod_col = find_col(ativos_df, "CÓD. ATIVO", "COD. ATIVO")
 
-    # Build asset list with initial positions
     assets = []
     for _, row in ativos_df.iterrows():
         code = str(row[cod_col]) if cod_col else ""
         name = str(row.get("ATIVO", ""))
         fin = float(row.get("FINANCEIRO", 0))
-        pct = float(row.get("% PL", 0))
-        assets.append({
-            "code": code,
-            "name": name,
-            "financeiro_atual": fin,
-            "pct_pl_atual": pct,
-        })
+        assets.append({"code": code, "name": name, "financeiro_atual": fin})
 
-    # Collect all unique liquidation dates and sort them
+    # Unique sorted liquidation dates
     all_dates = sorted(set(
         pd.Timestamp(m["liquidation_date"]) for m in all_movements
         if pd.notna(m.get("liquidation_date"))
     ))
-
     if not all_dates:
         return None, None, None
 
-    # Build the evolution: for each date, compute cumulative impact
-    # Result: dict of {date: {code: adjustment}}
+    # For each date: cumulative adjustments
     date_adjustments = {}
     caixa_adjustments = {}
 
@@ -305,7 +358,7 @@ def build_evolution_table(ativos_df, all_movements, caixa_initial):
         for mov in all_movements:
             liq_date = pd.Timestamp(mov["liquidation_date"])
             if liq_date > d:
-                continue  # Not yet liquidated
+                continue
 
             fund_code = str(mov.get("fund_code", ""))
             fund_name = mov["fund_name"]
@@ -326,42 +379,29 @@ def build_evolution_table(ativos_df, all_movements, caixa_initial):
                         break
 
             if op == "Resgate Passivo":
-                # Resgate passivo: investidores do fundo resgatando
-                # Dinheiro sai do PL (caixa diminui, PL total diminui)
                 caixa_adj -= value
-            elif op == "Resgate (Cotizando)" or op == "Resgate (Provisão)" or op == "Resgate":
-                # Resgate de ativo: subtrai do fundo, entra no caixa
+            elif op in ("Resgate (Cotizando)", "Resgate (Provisão)", "Resgate"):
                 if matched_code:
                     date_adjustments[d][matched_code] = date_adjustments[d].get(matched_code, 0) - value
                 caixa_adj += value
             elif "Aplicação" in op:
-                # Aplicação: add to fund, subtract from caixa
                 if matched_code:
                     date_adjustments[d][matched_code] = date_adjustments[d].get(matched_code, 0) + value
                 caixa_adj -= value
             elif op == "Débito/Passivo":
-                # Débito genérico: subtract from caixa (taxa, IR, etc.)
                 caixa_adj -= value
             elif op == "Crédito (Provisão)":
-                # Crédito genérico: add to caixa
                 caixa_adj += value
 
         caixa_adjustments[d] = caixa_adj
 
-    # Build the table
-    # Rows: assets + Caixa + Total
+    # Build R$ table
     rows_financeiro = []
-    rows_pct = []
-
     for a in assets:
         row_fin = {"Ativo": a["name"][:45], "Código": a["code"], "Atual (R$)": a["financeiro_atual"]}
-        row_pct = {"Ativo": a["name"][:45], "Código": a["code"], "Atual (%)": a["pct_pl_atual"]}
-
         for d in all_dates:
             adj = date_adjustments[d].get(a["code"], 0)
             row_fin[d.strftime("%d/%m/%Y")] = a["financeiro_atual"] + adj
-            # % will be calculated after totals
-
         rows_financeiro.append(row_fin)
 
     # Caixa row
@@ -372,7 +412,7 @@ def build_evolution_table(ativos_df, all_movements, caixa_initial):
 
     df_fin = pd.DataFrame(rows_financeiro)
 
-    # Calculate totals
+    # Total row
     date_cols = [d.strftime("%d/%m/%Y") for d in all_dates]
     total_row = {"Ativo": "📊 TOTAL PL", "Código": "", "Atual (R$)": df_fin["Atual (R$)"].sum()}
     for dc in date_cols:
@@ -380,14 +420,13 @@ def build_evolution_table(ativos_df, all_movements, caixa_initial):
     rows_financeiro.append(total_row)
     df_fin = pd.DataFrame(rows_financeiro)
 
-    # Now build % PL table
+    # Build % PL table
     rows_pct = []
     for _, r in df_fin.iterrows():
         if r["Ativo"] == "📊 TOTAL PL":
             continue
         row_pct = {
-            "Ativo": r["Ativo"],
-            "Código": r["Código"],
+            "Ativo": r["Ativo"], "Código": r["Código"],
             "Atual (%)": (r["Atual (R$)"] / total_row["Atual (R$)"] * 100) if total_row["Atual (R$)"] != 0 else 0,
         }
         for dc in date_cols:
@@ -395,14 +434,13 @@ def build_evolution_table(ativos_df, all_movements, caixa_initial):
             row_pct[dc] = (r[dc] / total_on_date * 100) if total_on_date != 0 else 0
         rows_pct.append(row_pct)
 
-    # Total % row
     total_pct_row = {"Ativo": "📊 TOTAL PL", "Código": "", "Atual (%)": 100.0}
     for dc in date_cols:
         total_pct_row[dc] = 100.0
     rows_pct.append(total_pct_row)
     df_pct = pd.DataFrame(rows_pct)
 
-    # Movements summary table
+    # Movements summary
     mov_rows = []
     for m in all_movements:
         mov_rows.append({
@@ -419,36 +457,28 @@ def build_evolution_table(ativos_df, all_movements, caixa_initial):
     return df_fin, df_pct, df_mov
 
 
+# ─────────────────────────────────────────────────────────
+# MODEL PORTFOLIO
+# ─────────────────────────────────────────────────────────
+
 def parse_model_portfolio(uploaded_file):
-    """
-    Parse a model portfolio file. Tries to auto-detect columns for:
-    - Asset code/name
-    - Target % allocation
-    Returns a DataFrame with columns: Código, Ativo, % Alvo
-    """
+    """Parse model portfolio. Auto-detects columns for code/name/% target."""
     df = pd.read_excel(uploaded_file)
     df.columns = [str(c).strip() for c in df.columns]
 
-    # Try to find the code column (first column with mixed alphanumeric)
-    code_col = None
-    name_col = None
-    pct_col = None
+    code_col = name_col = pct_col = None
 
     for c in df.columns:
         col_upper = c.upper()
-        # Percentage column
         if pct_col is None and any(k in col_upper for k in ["%", "PESO", "ALVO", "TARGET", "ALOC"]):
             pct_col = c
-        # Code column
         elif code_col is None and any(k in col_upper for k in ["CÓD", "COD", "CODIGO", "CODE", "ID"]):
             code_col = c
-        # Name column
         elif name_col is None and any(k in col_upper for k in ["ATIVO", "NOME", "FUNDO", "NAME", "ASSET"]):
             name_col = c
 
-    # Fallback: if not found by name, guess by position and content
+    # Fallback
     if code_col is None and name_col is None and pct_col is None:
-        # Assume: first col = code/name, last numeric col = %
         for c in df.columns:
             if df[c].dtype in ['float64', 'int64'] and pct_col is None:
                 pct_col = c
@@ -456,7 +486,6 @@ def parse_model_portfolio(uploaded_file):
                 code_col = c
 
     if pct_col is None:
-        # Try to find any column with values between 0 and 100
         for c in df.columns:
             if df[c].dtype in ['float64', 'int64']:
                 vals = df[c].dropna()
@@ -468,22 +497,18 @@ def parse_model_portfolio(uploaded_file):
     result["Código"] = df[code_col].astype(str) if code_col else ""
     result["Ativo"] = df[name_col].astype(str) if name_col else result["Código"]
     result["% Alvo"] = pd.to_numeric(df[pct_col], errors="coerce").fillna(0) if pct_col else 0
-
-    # Remove rows with 0% and empty
     result = result[result["% Alvo"] > 0].reset_index(drop=True)
-
     return result
 
 
 def build_adherence_analysis(ativos_df, model_df, all_movements, caixa_initial, pl_total):
     """
-    Compare current portfolio (after pending movements) with model portfolio.
-    Returns a DataFrame showing: current %, target %, gap, and suggested action.
+    Compare portfolio (after all pending movements) with model.
+    Returns adherence DataFrame + summary info dict.
     """
     cod_col = find_col(ativos_df, "CÓD. ATIVO", "COD. ATIVO")
 
-    # Step 1: Build post-liquidation position (after all provisions)
-    # Start with current positions
+    # Build positions
     positions = {}
     for _, row in ativos_df.iterrows():
         code = str(row[cod_col]) if cod_col else ""
@@ -491,35 +516,15 @@ def build_adherence_analysis(ativos_df, model_df, all_movements, caixa_initial, 
         fin = float(row.get("FINANCEIRO", 0))
         positions[code] = {"name": name, "financeiro": fin, "code": code}
 
-    # Apply all pending movements
+    # Apply movements
     caixa = caixa_initial
     for mov in all_movements:
         fund_code = str(mov.get("fund_code", ""))
-        value = mov["value"]
-        op = mov["operation"]
+        caixa = apply_movement(mov["operation"], mov["value"], fund_code, positions, caixa)
 
-        if op == "Resgate Passivo":
-            # Investidores resgatando do fundo: dinheiro sai do PL
-            caixa -= value
-        elif op in ("Resgate (Cotizando)", "Resgate (Provisão)", "Resgate"):
-            # Resgate de ativo: subtrai do fundo, entra no caixa
-            if fund_code in positions:
-                positions[fund_code]["financeiro"] -= value
-            caixa += value
-        elif "Aplicação" in op:
-            if fund_code in positions:
-                positions[fund_code]["financeiro"] += value
-            caixa -= value
-        elif op == "Débito/Passivo":
-            # Débito genérico (taxa, IR, etc.)
-            caixa -= value
-        elif op == "Crédito (Provisão)":
-            caixa += value
-
-    # Total PL after movements
     total_after = sum(p["financeiro"] for p in positions.values()) + caixa
 
-    # Step 2: Match model to actual positions
+    # Match model to positions
     rows = []
     model_codes = set()
 
@@ -529,21 +534,19 @@ def build_adherence_analysis(ativos_df, model_df, all_movements, caixa_initial, 
         m_pct_alvo = float(model_row["% Alvo"])
         model_codes.add(m_code)
 
-        # Find matching position
         matched_pos = None
         if m_code in positions:
             matched_pos = positions[m_code]
         else:
-            # Try matching by name
             for code, pos in positions.items():
                 if (m_name.upper()[:15] in pos["name"].upper() or
                         pos["name"].upper()[:15] in m_name.upper()):
                     matched_pos = pos
+                    model_codes.add(code)
                     break
 
         fin_atual = matched_pos["financeiro"] if matched_pos else 0
         pct_atual = (fin_atual / total_after * 100) if total_after > 0 else 0
-
         gap_pct = m_pct_alvo - pct_atual
         gap_rs = gap_pct / 100 * total_after
 
@@ -555,8 +558,7 @@ def build_adherence_analysis(ativos_df, model_df, all_movements, caixa_initial, 
             acao = f"📤 Resgatar R$ {abs(gap_rs):,.0f}"
 
         rows.append({
-            "Ativo": m_name[:45],
-            "Código": m_code,
+            "Ativo": m_name[:45], "Código": m_code,
             "Financeiro Projetado": fin_atual,
             "% Atual (Pós-Mov.)": round(pct_atual, 2),
             "% Alvo (Modelo)": round(m_pct_alvo, 2),
@@ -565,14 +567,13 @@ def build_adherence_analysis(ativos_df, model_df, all_movements, caixa_initial, 
             "Ação Sugerida": acao,
         })
 
-    # Add positions NOT in model (excess)
+    # Positions NOT in model
     for code, pos in positions.items():
         if code not in model_codes and pos["financeiro"] > 100:
             pct_atual = (pos["financeiro"] / total_after * 100) if total_after > 0 else 0
             if pct_atual > 0.05:
                 rows.append({
-                    "Ativo": pos["name"][:45],
-                    "Código": code,
+                    "Ativo": pos["name"][:45], "Código": code,
                     "Financeiro Projetado": pos["financeiro"],
                     "% Atual (Pós-Mov.)": round(pct_atual, 2),
                     "% Alvo (Modelo)": 0.0,
@@ -581,41 +582,32 @@ def build_adherence_analysis(ativos_df, model_df, all_movements, caixa_initial, 
                     "Ação Sugerida": f"📤 Resgatar R$ {pos['financeiro']:,.0f} (fora do modelo)",
                 })
 
-    # Caixa row
+    # Caixa
     caixa_pct = (caixa / total_after * 100) if total_after > 0 else 0
-    # Find caixa target in model (if any)
     caixa_target = 100 - model_df["% Alvo"].sum()
     caixa_gap = caixa_target - caixa_pct
-
     rows.append({
-        "Ativo": "💰 CAIXA",
-        "Código": "CAIXA",
+        "Ativo": "💰 CAIXA", "Código": "CAIXA",
         "Financeiro Projetado": caixa,
         "% Atual (Pós-Mov.)": round(caixa_pct, 2),
         "% Alvo (Modelo)": round(max(0, caixa_target), 2),
         "Gap (p.p.)": round(caixa_gap, 2),
         "Gap (R$)": round(caixa_gap / 100 * total_after, 2),
-        "Ação Sugerida": "Residual" if abs(caixa_gap) < 1 else ("Excess" if caixa_gap < -1 else "Deficit"),
+        "Ação Sugerida": "Residual" if abs(caixa_gap) < 1 else ("Excesso" if caixa_gap < -1 else "Déficit"),
     })
 
     df = pd.DataFrame(rows)
-
-    # Summary info
     info = {
         "pl_projetado": total_after,
         "caixa_projetado": caixa,
         "total_aplicar": sum(r["Gap (R$)"] for r in rows if r["Gap (R$)"] > 0 and r["Código"] != "CAIXA"),
         "total_resgatar": sum(abs(r["Gap (R$)"]) for r in rows if r["Gap (R$)"] < 0 and r["Código"] != "CAIXA"),
     }
-
     return df, info
 
 
 def generate_rebalancing_plan(adherence_df, liquid_df, request_date=None):
-    """
-    Generate a step-by-step rebalancing plan with liquidation dates.
-    Returns plan_df and a list of movements (for evolution table).
-    """
+    """Generate rebalancing plan: resgates first, then aplicações."""
     if request_date is None:
         request_date = pd.Timestamp(datetime.today().date())
 
@@ -626,13 +618,11 @@ def generate_rebalancing_plan(adherence_df, liquid_df, request_date=None):
         if row["Código"] == "CAIXA":
             continue
         gap = row["Gap (R$)"]
-        if abs(gap) < 100:  # Ignore tiny gaps
+        if abs(gap) < 100:
             continue
 
         code = row["Código"]
         name = row["Ativo"]
-
-        # Get liquidation info
         liq_info = match_fund_liquidation(name, code, liquid_df)
 
         if gap < 0:
@@ -661,8 +651,7 @@ def generate_rebalancing_plan(adherence_df, liquid_df, request_date=None):
 
         plan.append({
             "Prioridade": len(plan) + 1,
-            "Ativo": name,
-            "Código": code,
+            "Ativo": name, "Código": code,
             "Operação": op,
             "Valor (R$)": abs(gap),
             "D+": d_plus,
@@ -670,16 +659,12 @@ def generate_rebalancing_plan(adherence_df, liquid_df, request_date=None):
             "De % Atual": row["% Atual (Pós-Mov.)"],
             "Para % Alvo": row["% Alvo (Modelo)"],
         })
-
-        # Build movement for evolution table
         plan_movements.append({
-            "fund_name": name,
-            "fund_code": code,
-            "operation": op,
-            "value": abs(gap),
+            "fund_name": name, "fund_code": code,
+            "operation": op, "value": abs(gap),
             "request_date": request_date,
             "liquidation_date": liq_date,
-            "description": f"Plano modelo: {op} {name[:30]}",
+            "description": f"Plano: {op} {name[:30]}",
             "source": "plano_modelo",
         })
 
@@ -691,6 +676,183 @@ def generate_rebalancing_plan(adherence_df, liquid_df, request_date=None):
         plan_df = plan_df.drop(columns=["_sort"])
 
     return plan_df, plan_movements
+
+
+# ─────────────────────────────────────────────────────────
+# DISPLAY HELPERS
+# ─────────────────────────────────────────────────────────
+
+def display_provisions_summary(movements, expanded=False):
+    """Display a categorized view of provisions/movements."""
+    if not movements:
+        return
+
+    cotizando = [m for m in movements if m["operation"] == "Resgate (Cotizando)"]
+    passivo = [m for m in movements if m["operation"] == "Resgate Passivo"]
+    outros = [m for m in movements if m["operation"] in ("Débito/Passivo", "Crédito (Provisão)")]
+    manuais = [m for m in movements if m.get("source") == "manual"]
+    plano = [m for m in movements if m.get("source") == "plano_modelo"]
+
+    with st.expander(f"📌 {len(movements)} movimentos considerados", expanded=expanded):
+        if cotizando:
+            st.markdown(f"**🔄 Resgates Cotizando ({len(cotizando)})** — já solicitados, aguardando liquidação")
+            cotiz_df = pd.DataFrame([{
+                "Ativo": m["fund_name"][:40], "Código": m.get("fund_code", ""),
+                "Valor (R$)": m["value"],
+                "Liquidação": m["liquidation_date"].strftime("%d/%m/%Y"),
+            } for m in cotizando])
+            st.dataframe(cotiz_df.style.format({"Valor (R$)": "R$ {:,.2f}"}),
+                         use_container_width=True, hide_index=True)
+
+        if passivo:
+            st.markdown(f"**📤 Resgates Passivo ({len(passivo)})** — investidores resgatando (reduz PL)")
+            pass_df = pd.DataFrame([{
+                "Descrição": m["description"][:55],
+                "Valor (R$)": m["value"],
+                "Liquidação": m["liquidation_date"].strftime("%d/%m/%Y"),
+            } for m in passivo])
+            st.dataframe(pass_df.style.format({"Valor (R$)": "R$ {:,.2f}"}),
+                         use_container_width=True, hide_index=True)
+
+        if outros:
+            st.markdown(f"**💳 Débitos/Créditos ({len(outros)})** — taxas, IR, etc.")
+            outros_df = pd.DataFrame([{
+                "Descrição": m["description"][:55], "Tipo": m["operation"],
+                "Valor (R$)": m["value"],
+                "Liquidação": m["liquidation_date"].strftime("%d/%m/%Y"),
+            } for m in outros])
+            st.dataframe(outros_df.style.format({"Valor (R$)": "R$ {:,.2f}"}),
+                         use_container_width=True, hide_index=True)
+
+        if manuais:
+            st.markdown(f"**✏️ Movimentos Manuais ({len(manuais)})**")
+            man_df = pd.DataFrame([{
+                "Ativo": m["fund_name"][:40], "Operação": m["operation"],
+                "Valor (R$)": m["value"],
+                "Liquidação": m["liquidation_date"].strftime("%d/%m/%Y"),
+            } for m in manuais])
+            st.dataframe(man_df.style.format({"Valor (R$)": "R$ {:,.2f}"}),
+                         use_container_width=True, hide_index=True)
+
+        if plano:
+            st.markdown(f"**🎯 Plano Modelo ({len(plano)})**")
+            plan_df = pd.DataFrame([{
+                "Ativo": m["fund_name"][:40], "Operação": m["operation"],
+                "Valor (R$)": m["value"],
+                "Liquidação": m["liquidation_date"].strftime("%d/%m/%Y"),
+            } for m in plano])
+            st.dataframe(plan_df.style.format({"Valor (R$)": "R$ {:,.2f}"}),
+                         use_container_width=True, hide_index=True)
+
+        # Totals
+        total_val = sum(m["value"] for m in movements)
+        cols_summary = st.columns(5)
+        with cols_summary[0]:
+            st.metric("Total Movimentos", len(movements))
+        with cols_summary[1]:
+            st.metric("Resgates Cotizando", f"R$ {sum(m['value'] for m in cotizando):,.0f}")
+        with cols_summary[2]:
+            st.metric("Resgates Passivo", f"R$ {sum(m['value'] for m in passivo):,.0f}")
+        with cols_summary[3]:
+            st.metric("Débitos/Créditos", f"R$ {sum(m['value'] for m in outros):,.0f}")
+        with cols_summary[4]:
+            st.metric("Manuais", f"R$ {sum(m['value'] for m in manuais):,.0f}")
+
+
+def style_evolution_table_rows(row):
+    """Style function for evolution table rows (highlights TOTAL and CAIXA)."""
+    if row["Ativo"] == "📊 TOTAL PL":
+        return ["background-color: #1a3a5c; font-weight: bold"] * len(row)
+    elif row["Ativo"] == "💰 CAIXA":
+        return ["background-color: #2d4a1a"] * len(row)
+    return [""] * len(row)
+
+
+def display_evolution_tables(df_fin, df_pct, evo_date_cols, model_map=None):
+    """Display R$ and % PL evolution tables."""
+    evo_total_row = df_fin[df_fin["Ativo"] == "📊 TOTAL PL"].iloc[0]
+
+    # PL metrics
+    if evo_date_cols:
+        mcols = st.columns(min(len(evo_date_cols) + 1, 7))
+        with mcols[0]:
+            st.metric("PL Hoje", f"R$ {evo_total_row['Atual (R$)']:,.0f}")
+        for i, dc in enumerate(evo_date_cols[:6]):
+            with mcols[min(i + 1, 6)]:
+                val = evo_total_row[dc]
+                delta = val - evo_total_row["Atual (R$)"]
+                st.metric(dc, f"R$ {val:,.0f}", f"R$ {delta:,.0f}")
+
+    # R$ table
+    st.markdown("##### Evolução R$")
+    fmt_fin = {"Atual (R$)": "R$ {:,.2f}"}
+    for dc in evo_date_cols:
+        fmt_fin[dc] = "R$ {:,.2f}"
+    st.dataframe(
+        df_fin.drop(columns=["Código"]).style.format(fmt_fin).apply(style_evolution_table_rows, axis=1),
+        use_container_width=True, hide_index=True, height=420,
+    )
+
+    # % PL table
+    st.markdown("##### Evolução % PL")
+    fmt_pct = {"Atual (%)": "{:.2f}%"}
+    for dc in evo_date_cols:
+        fmt_pct[dc] = "{:.2f}%"
+
+    df_pct_display = df_pct.drop(columns=["Código"]).copy()
+
+    if model_map:
+        df_pct_display["🎯 Modelo"] = df_pct_display["Ativo"].map(model_map).fillna(0)
+        fmt_pct["🎯 Modelo"] = "{:.2f}%"
+
+        pct_value_cols = ["Atual (%)"] + evo_date_cols
+
+        def color_vs_model(row):
+            styles = []
+            ativo = row["Ativo"]
+            target = model_map.get(ativo, None)
+            for col in row.index:
+                if ativo == "📊 TOTAL PL":
+                    styles.append("background-color: #1a3a5c; font-weight: bold")
+                elif ativo == "💰 CAIXA":
+                    styles.append("background-color: #2d4a1a")
+                elif col in pct_value_cols and target is not None:
+                    val = row[col]
+                    diff = val - target
+                    if abs(diff) < 0.5:
+                        styles.append("background-color: #1a4a2a; color: #a3d9a5")
+                    elif diff > 0:
+                        intensity = min(abs(diff) / 5.0, 1.0)
+                        b = int(90 + 50 * intensity)
+                        styles.append(f"background-color: rgb(26, 58, {b}); color: #a5c8f5")
+                    else:
+                        intensity = min(abs(diff) / 5.0, 1.0)
+                        r = int(90 + 50 * intensity)
+                        styles.append(f"background-color: rgb({r}, 26, 26); color: #f5a5a5")
+                elif col == "🎯 Modelo":
+                    styles.append("background-color: #3a3a1a; color: #f5e6a5; font-weight: bold")
+                else:
+                    styles.append("")
+            return styles
+
+        st.dataframe(
+            df_pct_display.style.format(fmt_pct).apply(color_vs_model, axis=1),
+            use_container_width=True, hide_index=True, height=420,
+        )
+        st.markdown(
+            "<div style='display:flex; gap:20px; font-size:0.85em; margin-top:4px;'>"
+            "<span>🟢 <b>Aderente</b> (±0.5 p.p.)</span>"
+            "<span>🔵 <b>Acima</b> do modelo</span>"
+            "<span>🔴 <b>Abaixo</b> do modelo</span>"
+            "<span>🎯 <b>Modelo</b> = % alvo</span>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.dataframe(
+            df_pct_display.style.format(fmt_pct).apply(style_evolution_table_rows, axis=1),
+            use_container_width=True, hide_index=True, height=420,
+        )
 
 
 def export_to_excel(df_fin, df_pct, df_mov, carteira_info, adherence_df=None, plan_df=None):
@@ -712,14 +874,12 @@ def export_to_excel(df_fin, df_pct, df_mov, carteira_info, adherence_df=None, pl
     return output.getvalue()
 
 
-# ─────────────────────────────────────────────────────────
-# LOAD LIQUIDATION DATA
-# ─────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+# LOAD DATA & SESSION STATE
+# ═══════════════════════════════════════════════════════════
+
 liquid_df = load_liquidation_data()
 
-# ─────────────────────────────────────────────────────────
-# SESSION STATE INIT
-# ─────────────────────────────────────────────────────────
 if "new_movements" not in st.session_state:
     st.session_state.new_movements = []
 if "portfolio_loaded" not in st.session_state:
@@ -727,9 +887,11 @@ if "portfolio_loaded" not in st.session_state:
 if "model_loaded" not in st.session_state:
     st.session_state.model_loaded = False
 
-# ─────────────────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════
 # SIDEBAR
-# ─────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+
 with st.sidebar:
     st.title("📊 Simulador de Realocação")
     st.caption("TAG Investimentos")
@@ -738,144 +900,166 @@ with st.sidebar:
     page = st.radio(
         "Navegação",
         [
-            "📂 Importar Carteira",
+            "📂 Importar Dados",
             "📋 Posição Atual",
             "📊 Projeção da Carteira",
             "🎯 Carteira Modelo",
-            "🔄 Nova Realocação",
             "📅 Dados de Liquidação",
         ],
         label_visibility="collapsed",
     )
 
     st.divider()
+
+    # Context info
     st.caption(f"Base de liquidação: {len(liquid_df)} fundos")
     if st.session_state.portfolio_loaded:
-        st.caption(f"✅ Carteira: {st.session_state.get('uploaded_filename', '')}")
+        ctx = get_portfolio_context()
+        if ctx:
+            st.caption(f"✅ {st.session_state.get('uploaded_filename', '')}")
+            st.caption(f"PL: R$ {ctx['pl_total']:,.0f}")
+            n_prov = len(ctx["provision_movs"])
+            n_man = len(ctx["new_movs"])
+            if n_prov:
+                cotiz = len([m for m in ctx["provision_movs"] if m["operation"] == "Resgate (Cotizando)"])
+                passv = len([m for m in ctx["provision_movs"] if m["operation"] == "Resgate Passivo"])
+                st.caption(f"Provisões: {cotiz} resgates + {passv} passivo + {n_prov - cotiz - passv} outros")
+            if n_man:
+                st.caption(f"Movimentos manuais: {n_man}")
+            if st.session_state.model_loaded:
+                st.caption(f"🎯 Modelo: {len(st.session_state.model_df)} ativos")
+    else:
+        st.caption("⚠️ Nenhuma carteira carregada")
 
-# ═════════════════════════════════════════════════════════
-# PAGE: IMPORTAR CARTEIRA
-# ═════════════════════════════════════════════════════════
-if page == "📂 Importar Carteira":
-    st.header("📂 Importar Carteira")
-    st.markdown(
-        "Faça upload do arquivo de **Posição Projetada** no formato padrão "
-        "(`.xlsx` com abas: *Carteira e Caixa*, *Ativos*, *Provisões*, *Boletas Em Andamento*)."
-    )
 
-    uploaded = st.file_uploader(
-        "Selecione o arquivo da carteira",
-        type=["xlsx", "xls"],
-        help="Arquivo Posição_Projetada_Carteira_XXX.xlsx",
-    )
+# ═══════════════════════════════════════════════════════════
+# PAGE: IMPORTAR DADOS
+# ═══════════════════════════════════════════════════════════
 
-    if uploaded:
-        with st.spinner("Processando arquivo..."):
-            sheets = parse_portfolio_file(uploaded)
+if page == "📂 Importar Dados":
+    st.header("📂 Importar Dados")
 
-        if "ativos" in sheets:
-            st.session_state.portfolio_sheets = sheets
-            st.session_state.portfolio_loaded = True
-            st.session_state.uploaded_filename = uploaded.name
+    tab_carteira, tab_modelo = st.tabs(["📁 Carteira (Posição Projetada)", "🎯 Carteira Modelo"])
 
-            # Extract provisions as pending movements
-            ativos = sheets["ativos"]
-            provisoes = sheets.get("provisoes")
-            prov_movements = extract_provisions_as_movements(provisoes, ativos)
-            st.session_state.provision_movements = prov_movements
+    with tab_carteira:
+        st.markdown(
+            "Faça upload do arquivo de **Posição Projetada** "
+            "(`.xlsx` com abas: *Carteira e Caixa*, *Ativos*, *Provisões*, *Boletas*)."
+        )
 
-            st.success(f"✅ Carteira carregada com sucesso! ({uploaded.name})")
+        uploaded = st.file_uploader(
+            "Selecione o arquivo da carteira",
+            type=["xlsx", "xls"],
+            help="Arquivo Posição_Projetada_Carteira_XXX.xlsx",
+        )
 
-            # Show summary
-            carteira = sheets.get("carteira")
-            if carteira is not None and not carteira.empty:
-                row = carteira.iloc[0]
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Carteira", str(row.get("CARTEIRA", "N/A")))
-                with col2:
-                    pl = row.get("PL PROJETADO", row.get("PL FECHAMENTO", 0))
-                    st.metric("PL Projetado", f"R$ {pl:,.2f}")
-                with col3:
-                    st.metric("Qtde Ativos", len(ativos))
-                with col4:
-                    st.metric("Provisões", len(prov_movements))
+        if uploaded:
+            with st.spinner("Processando arquivo..."):
+                sheets = parse_portfolio_file(uploaded)
 
-            # Show provisions extracted
-            if prov_movements:
-                st.subheader("📌 Movimentos Pendentes Extraídos das Provisões")
-                prov_df = pd.DataFrame([{
-                    "Fundo": m["fund_name"][:45],
-                    "Tipo": m["operation"],
-                    "Valor (R$)": m["value"],
-                    "Data Liquidação": m["liquidation_date"].strftime("%d/%m/%Y"),
-                    "Descrição": m["description"][:60],
-                } for m in prov_movements])
+            if "ativos" in sheets:
+                st.session_state.portfolio_sheets = sheets
+                st.session_state.portfolio_loaded = True
+                st.session_state.uploaded_filename = uploaded.name
 
-                def color_prov_type(row):
-                    tipo = row["Tipo"]
-                    if tipo == "Resgate (Cotizando)":
-                        return ["background-color: #1a3a5c"] * len(row)
-                    elif tipo == "Resgate Passivo":
-                        return ["background-color: #5c3a1a"] * len(row)
-                    elif tipo == "Débito/Passivo":
-                        return ["background-color: #3a1a3a"] * len(row)
-                    return [""] * len(row)
+                ativos = sheets["ativos"]
+                provisoes = sheets.get("provisoes")
+                prov_movements = extract_provisions_as_movements(provisoes, ativos)
+                st.session_state.provision_movements = prov_movements
 
+                st.success(f"✅ Carteira carregada: **{uploaded.name}**")
+
+                # Summary
+                carteira = sheets.get("carteira")
+                if carteira is not None and not carteira.empty:
+                    row = carteira.iloc[0]
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Carteira", str(row.get("CARTEIRA", "N/A")))
+                    with col2:
+                        pl = row.get("PL PROJETADO", row.get("PL FECHAMENTO", 0))
+                        st.metric("PL Projetado", f"R$ {pl:,.2f}")
+                    with col3:
+                        st.metric("Ativos", len(ativos))
+                    with col4:
+                        st.metric("Provisões", len(prov_movements))
+
+                # Provisions
+                if prov_movements:
+                    display_provisions_summary(prov_movements, expanded=True)
+
+                # Liquidation match
+                st.subheader("Correspondência com Dados de Liquidação")
+                cod_col = find_col(ativos, "CÓD. ATIVO", "COD. ATIVO", "CODIGO")
+                match_results = []
+                for _, ativo in ativos.iterrows():
+                    fund_name = str(ativo.get("ATIVO", ""))
+                    fund_code = ativo.get(cod_col, None) if cod_col else None
+                    liq = match_fund_liquidation(fund_name, fund_code, liquid_df)
+                    match_results.append({
+                        "Ativo": fund_name[:45], "Código": fund_code,
+                        "Match": "✅" if liq is not None else "❌",
+                        "D+ Conv.": int(liq["Conversão Resgate"]) if liq is not None else "-",
+                        "D+ Liq.": int(liq["Liquid. Resgate"]) if liq is not None else "-",
+                        "Contagem": str(liq.get("Contagem Resgate", "")) if liq is not None else "-",
+                    })
+                df_match = pd.DataFrame(match_results)
+                matched_count = (df_match["Match"] == "✅").sum()
+                st.info(f"**{matched_count}/{len(df_match)}** ativos encontrados na base de liquidação.")
+                st.dataframe(df_match, use_container_width=True, hide_index=True)
+            else:
+                st.error("Arquivo não contém a aba 'Ativos'. Verifique o formato.")
+
+    with tab_modelo:
+        st.markdown("Faça upload da **Carteira Modelo** (planilha com colunas: Código/Ativo e % Alvo).")
+
+        model_file = st.file_uploader(
+            "Selecione o arquivo da Carteira Modelo",
+            type=["xlsx", "xls"],
+            help="Planilha com % alvo por ativo",
+            key="model_upload",
+        )
+
+        if model_file:
+            with st.spinner("Processando modelo..."):
+                model_df = parse_model_portfolio(model_file)
+                st.session_state.model_df = model_df
+                st.session_state.model_loaded = True
+
+            st.success(f"✅ Modelo carregado: {len(model_df)} ativos, total {model_df['% Alvo'].sum():.1f}%")
+
+        if st.session_state.model_loaded:
+            model_df = st.session_state.model_df
+            col1, col2 = st.columns([2, 1])
+            with col1:
                 st.dataframe(
-                    prov_df.style.format({"Valor (R$)": "R$ {:,.2f}"}).apply(color_prov_type, axis=1),
+                    model_df.style.format({"% Alvo": "{:.2f}%"}),
                     use_container_width=True, hide_index=True,
                 )
-                # Summary
-                n_cotiz = len([m for m in prov_movements if m["operation"] == "Resgate (Cotizando)"])
-                n_pass = len([m for m in prov_movements if m["operation"] == "Resgate Passivo"])
-                n_outros = len(prov_movements) - n_cotiz - n_pass
-                st.caption(
-                    f"🔄 {n_cotiz} resgates cotizando · "
-                    f"📤 {n_pass} resgates passivo · "
-                    f"💳 {n_outros} débitos/créditos"
-                )
-
-            # Show match with liquidation data
-            st.subheader("Correspondência com dados de liquidação")
-            cod_col = find_col(ativos, "CÓD. ATIVO", "COD. ATIVO", "CODIGO")
-            match_results = []
-            for _, ativo in ativos.iterrows():
-                fund_name = str(ativo.get("ATIVO", ""))
-                fund_code = ativo.get(cod_col, None) if cod_col else None
-                liq = match_fund_liquidation(fund_name, fund_code, liquid_df)
-                match_results.append({
-                    "Ativo": fund_name[:45],
-                    "Código": fund_code,
-                    "Match": "✅" if liq is not None else "❌",
-                    "D+ Conv. Resgate": int(liq["Conversão Resgate"]) if liq is not None else "-",
-                    "D+ Liq. Resgate": int(liq["Liquid. Resgate"]) if liq is not None else "-",
-                    "Contagem": str(liq.get("Contagem Resgate", "")) if liq is not None else "-",
-                })
-            df_match = pd.DataFrame(match_results)
-            matched_count = (df_match["Match"] == "✅").sum()
-            st.info(f"**{matched_count}** de **{len(df_match)}** ativos encontrados na base de liquidação.")
-            st.dataframe(df_match, use_container_width=True, hide_index=True)
-        else:
-            st.error("Arquivo não contém a aba 'Ativos'. Verifique o formato.")
+            with col2:
+                fig = px.pie(model_df, values="% Alvo", names="Ativo", hole=0.4)
+                fig.update_traces(textposition="inside", textinfo="percent+label")
+                fig.update_layout(height=300, showlegend=False, margin=dict(t=10, b=10))
+                st.plotly_chart(fig, use_container_width=True)
 
 
-# ═════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
 # PAGE: POSIÇÃO ATUAL
-# ═════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
+
 elif page == "📋 Posição Atual":
     st.header("📋 Posição Atual da Carteira")
 
-    if not st.session_state.portfolio_loaded:
-        st.warning("Nenhuma carteira carregada. Vá em **📂 Importar Carteira** primeiro.")
+    ctx = get_portfolio_context()
+    if not ctx:
+        st.warning("Nenhuma carteira carregada. Vá em **📂 Importar Dados** primeiro.")
     else:
-        sheets = st.session_state.portfolio_sheets
-        ativos = sheets["ativos"]
-        carteira = sheets.get("carteira")
+        ativos = ctx["ativos"]
+        carteira = ctx["carteira"]
 
         if carteira is not None and not carteira.empty:
             row = carteira.iloc[0]
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
                 pl = row.get("PL PROJETADO", row.get("PL FECHAMENTO", 0))
                 st.metric("PL Total", f"R$ {pl:,.2f}")
@@ -885,179 +1069,149 @@ elif page == "📋 Posição Atual":
             with col3:
                 liq_d0 = row.get("LIQUIDEZ D0", 0)
                 st.metric("Liquidez D0", f"R$ {liq_d0:,.2f}")
+            with col4:
+                st.metric("Ativos", len(ativos))
 
         # Table
         st.subheader("Ativos")
         estrategia_col = find_col(ativos, "ESTRATÉGIA", "ESTRATEGIA")
         preco_col = find_col(ativos, "PREÇO", "PRECO")
         display_col_candidates = [
-            "ATIVO", "CLASSE",
-            estrategia_col or "ESTRATÉGIA",
-            "QUANTIDADE", preco_col or "PREÇO",
-            "FINANCEIRO", "% PL",
+            "ATIVO", "CLASSE", estrategia_col or "ESTRATÉGIA",
+            "QUANTIDADE", preco_col or "PREÇO", "FINANCEIRO", "% PL",
         ]
         available_cols = [c for c in display_col_candidates if c and c in ativos.columns]
         df_display = ativos[available_cols].copy()
         fmt = {"FINANCEIRO": "R$ {:,.2f}", "QUANTIDADE": "{:,.2f}", "% PL": "{:.2f}%"}
         if preco_col and preco_col in df_display.columns:
             fmt[preco_col] = "R$ {:,.6f}"
-
         st.dataframe(df_display.style.format(fmt), use_container_width=True, hide_index=True, height=400)
 
-        # Charts side by side
+        # Charts
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("Alocação por Ativo")
             fig = px.pie(ativos, values="FINANCEIRO", names="ATIVO", hole=0.4)
             fig.update_traces(textposition="inside", textinfo="percent+label")
-            fig.update_layout(height=450, showlegend=False)
+            fig.update_layout(height=400, showlegend=False)
             st.plotly_chart(fig, use_container_width=True)
-
         with col2:
             strat_col = find_col(ativos, "ESTRATÉGIA", "ESTRATEGIA")
             if strat_col and strat_col in ativos.columns:
                 st.subheader("Alocação por Estratégia")
                 strat = ativos.groupby(strat_col)["FINANCEIRO"].sum().reset_index()
                 fig2 = px.bar(strat, x=strat_col, y="FINANCEIRO", text_auto=",.0f")
-                fig2.update_layout(xaxis_tickangle=-45, height=450)
+                fig2.update_layout(xaxis_tickangle=-45, height=400)
                 st.plotly_chart(fig2, use_container_width=True)
 
         # Provisões
-        provisoes = sheets.get("provisoes")
-        if provisoes is not None and not provisoes.empty:
-            st.subheader("Provisões Pendentes")
-            st.dataframe(provisoes, use_container_width=True, hide_index=True)
+        if ctx["provision_movs"]:
+            st.divider()
+            display_provisions_summary(ctx["provision_movs"], expanded=False)
 
 
-# ═════════════════════════════════════════════════════════
-# PAGE: PROJEÇÃO DA CARTEIRA (MAIN VIEW)
-# ═════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
+# PAGE: PROJEÇÃO DA CARTEIRA
+# ═══════════════════════════════════════════════════════════
+
 elif page == "📊 Projeção da Carteira":
-    st.header("📊 Projeção da Carteira por Data de Liquidação")
+    st.header("📊 Projeção da Carteira")
 
-    if not st.session_state.portfolio_loaded:
-        st.warning("Nenhuma carteira carregada. Vá em **📂 Importar Carteira** primeiro.")
+    ctx = get_portfolio_context()
+    if not ctx:
+        st.warning("Nenhuma carteira carregada. Vá em **📂 Importar Dados** primeiro.")
     else:
-        sheets = st.session_state.portfolio_sheets
-        ativos = sheets["ativos"]
-        carteira = sheets.get("carteira")
+        ativos = ctx["ativos"]
+        carteira = ctx["carteira"]
+        caixa_initial = ctx["caixa_initial"]
+        all_movements = ctx["all_movements"]
 
-        # Get initial caixa
-        caixa_initial = 0.0
-        if carteira is not None and not carteira.empty:
-            caixa_initial = float(carteira.iloc[0].get("CAIXA", 0))
+        # ── Add manual movement inline ──
+        with st.expander("➕ Adicionar Movimento Manual", expanded=False):
+            fund_names = ativos["ATIVO"].tolist()
+            cod_col = ctx["cod_col"]
 
-        # Combine provision movements + new manual movements
-        provision_movs = st.session_state.get("provision_movements", [])
-        new_movs = st.session_state.get("new_movements", [])
-        all_movements = provision_movs + new_movs
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                operation = st.selectbox("Operação", ["Resgate", "Aplicação"])
+            with col2:
+                fund = st.selectbox("Fundo/Ativo", fund_names)
+            with col3:
+                value = st.number_input("Valor (R$)", min_value=0.01, step=10000.0, format="%.2f")
+            with col4:
+                request_date = st.date_input("Data Solicitação", value=datetime.today())
+
+            col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
+            with col_btn1:
+                if st.button("➕ Adicionar", type="primary", use_container_width=True):
+                    fund_row = ativos[ativos["ATIVO"] == fund].iloc[0]
+                    fund_code = str(fund_row[cod_col]) if cod_col else None
+
+                    # Validation
+                    if operation == "Resgate":
+                        fin_atual = float(fund_row.get("FINANCEIRO", 0))
+                        if value > fin_atual * 1.05:
+                            st.error(f"⚠️ Valor R$ {value:,.2f} > financeiro do ativo R$ {fin_atual:,.2f}")
+                            st.stop()
+
+                    mov = {
+                        "fund_name": fund, "fund_code": fund_code,
+                        "operation": operation, "value": value,
+                        "request_date": pd.Timestamp(request_date), "source": "manual",
+                    }
+                    liq_date, d_plus, matched = compute_liquidation_date_for_new_movement(mov, liquid_df)
+                    mov["liquidation_date"] = liq_date
+                    mov["description"] = f"{operation} manual - {fund[:40]}"
+                    st.session_state.new_movements.append(mov)
+                    st.success(f"✅ {operation} R$ {value:,.0f} em {fund[:30]} → Liq: {liq_date.strftime('%d/%m/%Y')} ({d_plus})")
+                    st.rerun()
+
+            with col_btn2:
+                if st.session_state.new_movements:
+                    if st.button("🗑️ Limpar Manuais", type="secondary", use_container_width=True):
+                        st.session_state.new_movements = []
+                        st.rerun()
+
+        # Refresh after possible new movement
+        ctx = get_portfolio_context()
+        all_movements = ctx["all_movements"]
 
         if not all_movements:
-            st.info("Nenhum movimento pendente encontrado nas provisões e nenhuma realocação cadastrada.")
+            st.info(
+                "📭 Nenhum movimento pendente. A carteira não possui provisões e não há movimentos manuais.\n\n"
+                "Use o botão **➕ Adicionar Movimento Manual** acima para simular realocações."
+            )
         else:
-            # Build the evolution tables
+            # Show categorized movements
+            display_provisions_summary(all_movements, expanded=False)
+
+            st.divider()
+
+            # Build evolution
             df_fin, df_pct, df_mov = build_evolution_table(ativos, all_movements, caixa_initial)
 
             if df_fin is not None:
-                # ── Summary metrics ──
                 date_cols = [c for c in df_fin.columns if c not in ["Ativo", "Código", "Atual (R$)"]]
-                total_row = df_fin[df_fin["Ativo"] == "📊 TOTAL PL"].iloc[0]
+                display_evolution_tables(df_fin, df_pct, date_cols)
 
-                if date_cols:
-                    st.subheader("Resumo por Data")
-                    metric_cols = st.columns(min(len(date_cols) + 1, 6))
-                    with metric_cols[0]:
-                        st.metric("Hoje", f"R$ {total_row['Atual (R$)']:,.0f}")
-                    for i, dc in enumerate(date_cols[:5]):
-                        with metric_cols[min(i + 1, 5)]:
-                            val = total_row[dc]
-                            delta = val - total_row["Atual (R$)"]
-                            st.metric(dc, f"R$ {val:,.0f}", f"R$ {delta:,.0f}")
-
+                # Variation chart
                 st.divider()
-
-                # ── Movimentos pendentes ──
-                st.subheader("📌 Movimentos Considerados")
-                with st.expander(f"Ver {len(all_movements)} movimentos", expanded=False):
-                    st.dataframe(df_mov, use_container_width=True, hide_index=True)
-
-                st.divider()
-
-                # ── Main evolution table (R$) ──
-                st.subheader("Evolução da Carteira (R$)")
-
-                # Format the financial table
-                format_dict_fin = {"Atual (R$)": "R$ {:,.2f}"}
-                for dc in date_cols:
-                    format_dict_fin[dc] = "R$ {:,.2f}"
-
-                # Color rows: highlight total and caixa
-                def highlight_special_rows(row):
-                    if row["Ativo"] == "📊 TOTAL PL":
-                        return ["background-color: #1a3a5c; font-weight: bold"] * len(row)
-                    elif row["Ativo"] == "💰 CAIXA":
-                        return ["background-color: #2d4a1a"] * len(row)
-                    return [""] * len(row)
-
-                styled_fin = (
-                    df_fin.drop(columns=["Código"])
-                    .style
-                    .format(format_dict_fin)
-                    .apply(highlight_special_rows, axis=1)
-                )
-                st.dataframe(styled_fin, use_container_width=True, hide_index=True, height=450)
-
-                # ── Evolution table (% PL) ──
-                st.subheader("Evolução da Carteira (% PL)")
-                format_dict_pct = {"Atual (%)": "{:.2f}%"}
-                for dc in date_cols:
-                    format_dict_pct[dc] = "{:.2f}%"
-
-                def highlight_special_rows_pct(row):
-                    if row["Ativo"] == "📊 TOTAL PL":
-                        return ["background-color: #1a3a5c; font-weight: bold"] * len(row)
-                    elif row["Ativo"] == "💰 CAIXA":
-                        return ["background-color: #2d4a1a"] * len(row)
-                    return [""] * len(row)
-
-                styled_pct = (
-                    df_pct.drop(columns=["Código"])
-                    .style
-                    .format(format_dict_pct)
-                    .apply(highlight_special_rows_pct, axis=1)
-                )
-                st.dataframe(styled_pct, use_container_width=True, hide_index=True, height=450)
-
-                # ── Variation chart ──
                 st.subheader("Variação % PL: Hoje vs Última Data")
                 last_date_col = date_cols[-1] if date_cols else None
                 if last_date_col:
                     chart_df = df_pct[~df_pct["Ativo"].isin(["📊 TOTAL PL"])].copy()
-                    chart_df["Δ % PL"] = chart_df[last_date_col] - chart_df["Atual (%)"]
-
                     fig = go.Figure()
-                    fig.add_trace(go.Bar(
-                        name="Hoje",
-                        x=chart_df["Ativo"],
-                        y=chart_df["Atual (%)"],
-                        marker_color="#3498db",
-                    ))
-                    fig.add_trace(go.Bar(
-                        name=last_date_col,
-                        x=chart_df["Ativo"],
-                        y=chart_df[last_date_col],
-                        marker_color="#e67e22",
-                    ))
-                    fig.update_layout(barmode="group", height=450, xaxis_tickangle=-30, yaxis_title="% PL")
+                    fig.add_trace(go.Bar(name="Hoje", x=chart_df["Ativo"], y=chart_df["Atual (%)"], marker_color="#3498db"))
+                    fig.add_trace(go.Bar(name=last_date_col, x=chart_df["Ativo"], y=chart_df[last_date_col], marker_color="#e67e22"))
+                    fig.update_layout(barmode="group", height=400, xaxis_tickangle=-30, yaxis_title="% PL")
                     st.plotly_chart(fig, use_container_width=True)
 
-                # ── Timeline chart ──
+                # Timeline
                 st.subheader("Timeline de Liquidação")
                 timeline_data = df_mov[df_mov["Data Liquidação"] != ""].copy()
                 if not timeline_data.empty:
                     timeline_data["Data Solicitação"] = pd.to_datetime(timeline_data["Data Solicitação"], dayfirst=True)
                     timeline_data["Data Liquidação"] = pd.to_datetime(timeline_data["Data Liquidação"], dayfirst=True)
-                    # Ensure start < end for timeline
                     timeline_data.loc[
                         timeline_data["Data Solicitação"] == timeline_data["Data Liquidação"],
                         "Data Liquidação"
@@ -1071,19 +1225,15 @@ elif page == "📊 Projeção da Carteira":
                         timeline_data, x_start="Data Solicitação", x_end="Data Liquidação",
                         y="Label", color="Operação",
                         color_discrete_map={
-                            "Resgate (Cotizando)": "#e74c3c",
-                            "Resgate (Provisão)": "#e74c3c",
-                            "Resgate Passivo": "#e67e22",
-                            "Débito/Passivo": "#9b59b6",
-                            "Crédito (Provisão)": "#3498db",
-                            "Resgate": "#e74c3c",
-                            "Aplicação": "#2ecc71",
+                            "Resgate (Cotizando)": "#e74c3c", "Resgate Passivo": "#e67e22",
+                            "Débito/Passivo": "#9b59b6", "Crédito (Provisão)": "#3498db",
+                            "Resgate": "#c0392b", "Aplicação": "#2ecc71",
                         },
                     )
-                    fig_tl.update_layout(height=max(300, len(timeline_data) * 45), yaxis_title="")
+                    fig_tl.update_layout(height=max(300, len(timeline_data) * 40), yaxis_title="")
                     st.plotly_chart(fig_tl, use_container_width=True)
 
-                # ── Export ──
+                # Export
                 st.divider()
                 excel_data = export_to_excel(df_fin, df_pct, df_mov, carteira)
                 st.download_button(
@@ -1095,564 +1245,178 @@ elif page == "📊 Projeção da Carteira":
                 )
 
 
-# ═════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
 # PAGE: CARTEIRA MODELO
-# ═════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
+
 elif page == "🎯 Carteira Modelo":
     st.header("🎯 Aderência à Carteira Modelo")
 
-    if not st.session_state.portfolio_loaded:
-        st.warning("Nenhuma carteira carregada. Vá em **📂 Importar Carteira** primeiro.")
+    ctx = get_portfolio_context()
+    if not ctx:
+        st.warning("Nenhuma carteira carregada. Vá em **📂 Importar Dados** primeiro.")
+    elif not st.session_state.model_loaded:
+        st.warning("Nenhuma carteira modelo carregada. Vá em **📂 Importar Dados** → aba **🎯 Carteira Modelo**.")
     else:
-        st.markdown(
-            "Faça upload da **Carteira Modelo** para comparar com a posição atual "
-            "(considerando provisões e movimentos pendentes). "
-            "O sistema mostra o gap e sugere exatamente o que fazer para aderir ao modelo."
-        )
+        model_df = st.session_state.model_df
+        ativos = ctx["ativos"]
+        carteira = ctx["carteira"]
+        caixa_initial = ctx["caixa_initial"]
+        pl_total = ctx["pl_total"]
+        all_movements = ctx["all_movements"]
 
-        model_file = st.file_uploader(
-            "Selecione o arquivo da Carteira Modelo",
-            type=["xlsx", "xls"],
-            help="Planilha com colunas: Código/Ativo e % Alvo",
-            key="model_upload",
-        )
-
-        if model_file:
-            with st.spinner("Processando carteira modelo..."):
-                model_df = parse_model_portfolio(model_file)
-                st.session_state.model_df = model_df
-                st.session_state.model_loaded = True
-
-            st.success(f"✅ Carteira modelo carregada: {len(model_df)} ativos, total {model_df['% Alvo'].sum():.1f}%")
-
-        if st.session_state.model_loaded:
-            model_df = st.session_state.model_df
-            sheets = st.session_state.portfolio_sheets
-            ativos = sheets["ativos"]
-            carteira = sheets.get("carteira")
-
-            # Get caixa and PL
-            caixa_initial = 0.0
-            pl_total = 0.0
-            if carteira is not None and not carteira.empty:
-                caixa_initial = float(carteira.iloc[0].get("CAIXA", 0))
-                pl_total = float(carteira.iloc[0].get("PL PROJETADO", carteira.iloc[0].get("PL FECHAMENTO", 0)))
-
-            # Combine all movements (provisions + manual)
-            provision_movs = st.session_state.get("provision_movements", [])
-            new_movs = st.session_state.get("new_movements", [])
-            all_movements = provision_movs + new_movs
-
-            # Show the model
-            st.subheader("Carteira Modelo")
-            col1, col2 = st.columns([2, 1])
-            with col1:
-                st.dataframe(
-                    model_df.style.format({"% Alvo": "{:.2f}%"}),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-            with col2:
-                fig_model = px.pie(model_df, values="% Alvo", names="Ativo", hole=0.4)
-                fig_model.update_traces(textposition="inside", textinfo="percent+label")
-                fig_model.update_layout(height=350, showlegend=False, margin=dict(t=10, b=10))
-                st.plotly_chart(fig_model, use_container_width=True)
-
+        # ── Movimentos em andamento ──
+        if all_movements:
+            display_provisions_summary(all_movements, expanded=False)
             st.divider()
 
-            # ── Show provisions in progress ──
-            if all_movements:
-                resgates_cotizando = [m for m in all_movements if m["operation"] == "Resgate (Cotizando)"]
-                resgates_passivo = [m for m in all_movements if m["operation"] == "Resgate Passivo"]
-                debitos_outros = [m for m in all_movements if m["operation"] in ("Débito/Passivo", "Crédito (Provisão)")]
+        # ── Análise de Aderência ──
+        st.subheader("📊 Análise de Aderência")
+        if all_movements:
+            cotiz = len([m for m in all_movements if m["operation"] == "Resgate (Cotizando)"])
+            passv = len([m for m in all_movements if m["operation"] == "Resgate Passivo"])
+            st.caption(f"Posição projetada considerando {len(all_movements)} movimentos pendentes ({cotiz} resgates cotizando, {passv} resgates passivo)")
 
-                st.subheader("📌 Movimentos Pendentes (já em andamento)")
+        adherence_df, info = build_adherence_analysis(ativos, model_df, all_movements, caixa_initial, pl_total)
 
-                if resgates_cotizando:
-                    st.markdown("**🔄 Resgates de Ativos Cotizando** *(já solicitados, aguardando liquidação)*")
-                    cotiz_df = pd.DataFrame([{
-                        "Ativo": m["fund_name"][:45],
-                        "Código": m.get("fund_code", ""),
-                        "Valor (R$)": m["value"],
-                        "Data Operação": m["request_date"].strftime("%d/%m/%Y"),
-                        "Data Liquidação": m["liquidation_date"].strftime("%d/%m/%Y"),
-                    } for m in resgates_cotizando])
-                    st.dataframe(
-                        cotiz_df.style.format({"Valor (R$)": "R$ {:,.2f}"}),
-                        use_container_width=True, hide_index=True,
-                    )
-                    total_cotiz = sum(m["value"] for m in resgates_cotizando)
-                    st.caption(f"Total resgates cotizando: **R$ {total_cotiz:,.2f}**")
+        # Metrics
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("PL Projetado", f"R$ {info['pl_projetado']:,.0f}")
+        with col2:
+            st.metric("Caixa Projetado", f"R$ {info['caixa_projetado']:,.0f}")
+        with col3:
+            st.metric("Total a Aplicar", f"R$ {info['total_aplicar']:,.0f}")
+        with col4:
+            st.metric("Total a Resgatar", f"R$ {info['total_resgatar']:,.0f}")
 
-                if resgates_passivo:
-                    st.markdown("**📤 Resgates de Passivo** *(investidores do fundo resgatando — reduz o PL)*")
-                    passivo_df = pd.DataFrame([{
-                        "Descrição": m["description"][:60],
-                        "Valor (R$)": m["value"],
-                        "Data Operação": m["request_date"].strftime("%d/%m/%Y"),
-                        "Data Liquidação": m["liquidation_date"].strftime("%d/%m/%Y"),
-                    } for m in resgates_passivo])
-                    st.dataframe(
-                        passivo_df.style.format({"Valor (R$)": "R$ {:,.2f}"}),
-                        use_container_width=True, hide_index=True,
-                    )
-                    total_passivo = sum(m["value"] for m in resgates_passivo)
-                    st.caption(f"Total resgates passivo: **R$ {total_passivo:,.2f}** *(sai do PL)*")
-
-                if debitos_outros:
-                    st.markdown("**💳 Outros Débitos/Créditos** *(taxas, IR, etc.)*")
-                    outros_df = pd.DataFrame([{
-                        "Descrição": m["description"][:60],
-                        "Tipo": m["operation"],
-                        "Valor (R$)": m["value"],
-                        "Data Liquidação": m["liquidation_date"].strftime("%d/%m/%Y"),
-                    } for m in debitos_outros])
-                    st.dataframe(
-                        outros_df.style.format({"Valor (R$)": "R$ {:,.2f}"}),
-                        use_container_width=True, hide_index=True,
-                    )
-
-                st.divider()
-
-            # ── Adherence Analysis ──
-            st.subheader("📊 Análise de Aderência (Pós-Movimentos Pendentes)")
-
-            if all_movements:
-                n_cotiz = len([m for m in all_movements if m["operation"] == "Resgate (Cotizando)"])
-                n_pass = len([m for m in all_movements if m["operation"] == "Resgate Passivo"])
-                n_outros = len([m for m in all_movements if m["operation"] in ("Débito/Passivo", "Crédito (Provisão)")])
-                parts = []
-                if n_cotiz:
-                    parts.append(f"{n_cotiz} resgates cotizando")
-                if n_pass:
-                    parts.append(f"{n_pass} resgates passivo")
-                if n_outros:
-                    parts.append(f"{n_outros} débitos/créditos")
-                summary = ", ".join(parts)
-                st.info(f"Considerando **{len(all_movements)} movimentos pendentes** ({summary}) antes de comparar com o modelo.")
-
-            adherence_df, info = build_adherence_analysis(
-                ativos, model_df, all_movements, caixa_initial, pl_total
-            )
-
-            # Summary metrics
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("PL Projetado", f"R$ {info['pl_projetado']:,.0f}")
-            with col2:
-                st.metric("Caixa Projetado", f"R$ {info['caixa_projetado']:,.0f}")
-            with col3:
-                st.metric("Total a Aplicar", f"R$ {info['total_aplicar']:,.0f}", delta_color="normal")
-            with col4:
-                st.metric("Total a Resgatar", f"R$ {info['total_resgatar']:,.0f}", delta_color="inverse")
-
-            # Adherence table
-            def color_gap(row):
-                gap = row["Gap (p.p.)"]
-                if row["Ativo"] == "💰 CAIXA":
-                    return ["background-color: #2d4a1a"] * len(row)
-                if abs(gap) < 0.5:
-                    return ["background-color: #1a3a1a"] * len(row)
-                elif gap > 0:
-                    return ["background-color: #1a3a5c"] * len(row)
-                else:
-                    return ["background-color: #5c1a1a"] * len(row)
-
-            st.dataframe(
-                adherence_df.style
-                .format({
-                    "Financeiro Projetado": "R$ {:,.2f}",
-                    "% Atual (Pós-Mov.)": "{:.2f}%",
-                    "% Alvo (Modelo)": "{:.2f}%",
-                    "Gap (p.p.)": "{:+.2f}",
-                    "Gap (R$)": "R$ {:,.0f}",
-                })
-                .apply(color_gap, axis=1),
-                use_container_width=True,
-                hide_index=True,
-                height=500,
-            )
-
-            # Gap chart
-            st.subheader("Gap: Atual vs Modelo")
-            chart_data = adherence_df[adherence_df["Código"] != "CAIXA"].copy()
-            fig_gap = go.Figure()
-            fig_gap.add_trace(go.Bar(
-                name="% Atual (Pós-Mov.)",
-                x=chart_data["Ativo"],
-                y=chart_data["% Atual (Pós-Mov.)"],
-                marker_color="#3498db",
-            ))
-            fig_gap.add_trace(go.Bar(
-                name="% Alvo (Modelo)",
-                x=chart_data["Ativo"],
-                y=chart_data["% Alvo (Modelo)"],
-                marker_color="#e67e22",
-            ))
-            fig_gap.update_layout(barmode="group", height=450, xaxis_tickangle=-30, yaxis_title="% PL")
-            st.plotly_chart(fig_gap, use_container_width=True)
-
-            st.divider()
-
-            # ── Rebalancing Plan ──
-            st.subheader("📋 Plano de Realocação Sugerido")
-            st.markdown("*Resgates primeiro (liberar caixa) → depois Aplicações. Considera provisões já em andamento.*")
-
-            plan_df, plan_movements = generate_rebalancing_plan(adherence_df, liquid_df)
-
-            if not plan_df.empty:
-                # Separate resgates and aplicações
-                resgates = plan_df[plan_df["Operação"] == "Resgate"]
-                aplicacoes = plan_df[plan_df["Operação"] == "Aplicação"]
-
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown("**📤 Resgates a realizar:**")
-                    if not resgates.empty:
-                        st.dataframe(
-                            resgates.style.format({
-                                "Valor (R$)": "R$ {:,.0f}",
-                                "De % Atual": "{:.2f}%",
-                                "Para % Alvo": "{:.2f}%",
-                            }),
-                            use_container_width=True,
-                            hide_index=True,
-                        )
-                        st.metric("Total Resgates", f"R$ {resgates['Valor (R$)'].sum():,.0f}")
-                    else:
-                        st.info("Nenhum resgate necessário.")
-
-                with col2:
-                    st.markdown("**📥 Aplicações a realizar:**")
-                    if not aplicacoes.empty:
-                        st.dataframe(
-                            aplicacoes.style.format({
-                                "Valor (R$)": "R$ {:,.0f}",
-                                "De % Atual": "{:.2f}%",
-                                "Para % Alvo": "{:.2f}%",
-                            }),
-                            use_container_width=True,
-                            hide_index=True,
-                        )
-                        st.metric("Total Aplicações", f"R$ {aplicacoes['Valor (R$)'].sum():,.0f}")
-                    else:
-                        st.info("Nenhuma aplicação necessária.")
-
-                # Full plan table
-                st.subheader("Plano Completo (ordenado por prioridade)")
-                st.dataframe(
-                    plan_df.style.format({
-                        "Valor (R$)": "R$ {:,.0f}",
-                        "De % Atual": "{:.2f}%",
-                        "Para % Alvo": "{:.2f}%",
-                    }).apply(
-                        lambda row: [
-                            "background-color: #4a1a1a" if row["Operação"] == "Resgate" else "background-color: #1a4a2a"
-                        ] * len(row),
-                        axis=1,
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-                # ═══════════════════════════════════════════
-                # EVOLUTION TABLE: Provisões + Plano Modelo
-                # ═══════════════════════════════════════════
-                st.divider()
-                st.subheader("📅 Projeção da Carteira por Data de Liquidação")
-                st.markdown(
-                    "Visão completa: **provisões já em andamento** + **plano de realocação sugerido**. "
-                    "Mostra como a carteira ficará em cada data de liquidação futura."
-                )
-
-                # Combine: existing provisions + plan movements
-                combined_movements = all_movements + plan_movements
-
-                df_evo_fin, df_evo_pct, df_evo_mov = build_evolution_table(
-                    ativos, combined_movements, caixa_initial
-                )
-
-                if df_evo_fin is not None:
-                    evo_date_cols = [c for c in df_evo_fin.columns if c not in ["Ativo", "Código", "Atual (R$)"]]
-                    evo_total_row = df_evo_fin[df_evo_fin["Ativo"] == "📊 TOTAL PL"].iloc[0]
-
-                    # Summary metrics per date
-                    if evo_date_cols:
-                        st.markdown("**Resumo PL por data:**")
-                        mcols = st.columns(min(len(evo_date_cols) + 1, 7))
-                        with mcols[0]:
-                            st.metric("Hoje", f"R$ {evo_total_row['Atual (R$)']:,.0f}")
-                        for i, dc in enumerate(evo_date_cols[:6]):
-                            with mcols[min(i + 1, 6)]:
-                                val = evo_total_row[dc]
-                                delta = val - evo_total_row["Atual (R$)"]
-                                st.metric(dc, f"R$ {val:,.0f}", f"R$ {delta:,.0f}")
-
-                    # Movimentos considerados
-                    with st.expander(f"Ver {len(combined_movements)} movimentos (provisões + plano)", expanded=False):
-                        st.dataframe(df_evo_mov, use_container_width=True, hide_index=True)
-
-                    # Evolution R$ table
-                    st.markdown("**Evolução R$:**")
-                    fmt_fin = {"Atual (R$)": "R$ {:,.2f}"}
-                    for dc in evo_date_cols:
-                        fmt_fin[dc] = "R$ {:,.2f}"
-
-                    def hl_rows(row):
-                        if row["Ativo"] == "📊 TOTAL PL":
-                            return ["background-color: #1a3a5c; font-weight: bold"] * len(row)
-                        elif row["Ativo"] == "💰 CAIXA":
-                            return ["background-color: #2d4a1a"] * len(row)
-                        return [""] * len(row)
-
-                    st.dataframe(
-                        df_evo_fin.drop(columns=["Código"]).style.format(fmt_fin).apply(hl_rows, axis=1),
-                        use_container_width=True, hide_index=True, height=450,
-                    )
-
-                    # Evolution % table
-                    st.markdown("**Evolução % PL:**")
-                    fmt_pct = {"Atual (%)": "{:.2f}%"}
-                    for dc in evo_date_cols:
-                        fmt_pct[dc] = "{:.2f}%"
-
-                    # Add model target column for comparison
-                    df_evo_pct_display = df_evo_pct.drop(columns=["Código"]).copy()
-                    # Merge model target
-                    model_map = dict(zip(
-                        adherence_df["Ativo"].str[:45],
-                        adherence_df["% Alvo (Modelo)"]
-                    ))
-                    df_evo_pct_display["🎯 Modelo"] = df_evo_pct_display["Ativo"].map(model_map).fillna(0)
-                    fmt_pct["🎯 Modelo"] = "{:.2f}%"
-
-                    # Color coding: compare each % cell against model target
-                    pct_value_cols = ["Atual (%)"] + evo_date_cols
-
-                    def color_vs_model(row):
-                        """Color cells based on distance to model target."""
-                        styles = []
-                        ativo = row["Ativo"]
-                        target = model_map.get(ativo, None)
-
-                        for col in row.index:
-                            if ativo == "📊 TOTAL PL":
-                                styles.append("background-color: #1a3a5c; font-weight: bold")
-                            elif ativo == "💰 CAIXA":
-                                styles.append("background-color: #2d4a1a")
-                            elif col in pct_value_cols and target is not None:
-                                val = row[col]
-                                diff = val - target
-                                if abs(diff) < 0.5:
-                                    # On target (green)
-                                    styles.append("background-color: #1a4a2a; color: #a3d9a5")
-                                elif diff > 0:
-                                    # Overweight / above model (blue)
-                                    intensity = min(abs(diff) / 5.0, 1.0)
-                                    b = int(90 + 50 * intensity)
-                                    styles.append(f"background-color: rgb(26, 58, {b}); color: #a5c8f5")
-                                else:
-                                    # Underweight / below model (red)
-                                    intensity = min(abs(diff) / 5.0, 1.0)
-                                    r = int(90 + 50 * intensity)
-                                    styles.append(f"background-color: rgb({r}, 26, 26); color: #f5a5a5")
-                            elif col == "🎯 Modelo":
-                                styles.append("background-color: #3a3a1a; color: #f5e6a5; font-weight: bold")
-                            else:
-                                styles.append("")
-                        return styles
-
-                    st.dataframe(
-                        df_evo_pct_display.style.format(fmt_pct).apply(color_vs_model, axis=1),
-                        use_container_width=True, hide_index=True, height=450,
-                    )
-
-                    # Legend
-                    st.markdown(
-                        "<div style='display:flex; gap:20px; font-size:0.85em; margin-top:4px;'>"
-                        "<span>🟢 <b>Aderente</b> (±0.5 p.p.)</span>"
-                        "<span>🔵 <b>Acima</b> do modelo (overweight)</span>"
-                        "<span>🔴 <b>Abaixo</b> do modelo (underweight)</span>"
-                        "<span>🎯 <b>Modelo</b> = % alvo</span>"
-                        "</div>",
-                        unsafe_allow_html=True,
-                    )
-
-                    # Chart: last date vs model
-                    last_dc = evo_date_cols[-1] if evo_date_cols else None
-                    if last_dc:
-                        st.subheader(f"Comparação: Carteira Final ({last_dc}) vs Modelo")
-                        cmp = df_evo_pct_display[
-                            ~df_evo_pct_display["Ativo"].isin(["📊 TOTAL PL"])
-                        ].copy()
-                        fig_cmp = go.Figure()
-                        fig_cmp.add_trace(go.Bar(
-                            name=f"Projeção {last_dc}",
-                            x=cmp["Ativo"], y=cmp[last_dc],
-                            marker_color="#3498db",
-                        ))
-                        fig_cmp.add_trace(go.Bar(
-                            name="🎯 Modelo",
-                            x=cmp["Ativo"], y=cmp["🎯 Modelo"],
-                            marker_color="#e67e22",
-                        ))
-                        fig_cmp.update_layout(
-                            barmode="group", height=450,
-                            xaxis_tickangle=-30, yaxis_title="% PL",
-                        )
-                        st.plotly_chart(fig_cmp, use_container_width=True)
-
-                # Export
-                st.divider()
-                excel_data = export_to_excel(
-                    df_evo_fin, df_evo_pct, df_evo_mov,
-                    carteira,
-                    adherence_df=adherence_df,
-                    plan_df=plan_df,
-                )
-                st.download_button(
-                    label="📥 Exportar Tudo para Excel",
-                    data=excel_data,
-                    file_name=f"plano_realocacao_modelo_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    type="primary",
-                )
+        # Adherence table with colors
+        def color_gap(row):
+            gap = row["Gap (p.p.)"]
+            if row["Ativo"] == "💰 CAIXA":
+                return ["background-color: #2d4a1a"] * len(row)
+            if abs(gap) < 0.5:
+                return ["background-color: #1a3a1a"] * len(row)
+            elif gap > 0:
+                return ["background-color: #1a3a5c"] * len(row)
             else:
-                st.success("🎯 Carteira já está aderente ao modelo! Nenhuma movimentação necessária.")
+                return ["background-color: #5c1a1a"] * len(row)
 
+        st.dataframe(
+            adherence_df.style
+            .format({
+                "Financeiro Projetado": "R$ {:,.2f}",
+                "% Atual (Pós-Mov.)": "{:.2f}%",
+                "% Alvo (Modelo)": "{:.2f}%",
+                "Gap (p.p.)": "{:+.2f}",
+                "Gap (R$)": "R$ {:,.0f}",
+            })
+            .apply(color_gap, axis=1),
+            use_container_width=True, hide_index=True, height=450,
+        )
 
-# ═════════════════════════════════════════════════════════
-# PAGE: NOVA REALOCAÇÃO
-# ═════════════════════════════════════════════════════════
-elif page == "🔄 Nova Realocação":
-    st.header("🔄 Cadastrar Nova Realocação / Movimento")
+        # Gap chart
+        chart_data = adherence_df[adherence_df["Código"] != "CAIXA"].copy()
+        fig_gap = go.Figure()
+        fig_gap.add_trace(go.Bar(name="% Atual", x=chart_data["Ativo"], y=chart_data["% Atual (Pós-Mov.)"], marker_color="#3498db"))
+        fig_gap.add_trace(go.Bar(name="% Modelo", x=chart_data["Ativo"], y=chart_data["% Alvo (Modelo)"], marker_color="#e67e22"))
+        fig_gap.update_layout(barmode="group", height=400, xaxis_tickangle=-30, yaxis_title="% PL")
+        st.plotly_chart(fig_gap, use_container_width=True)
 
-    if not st.session_state.portfolio_loaded:
-        st.warning("Nenhuma carteira carregada. Vá em **📂 Importar Carteira** primeiro.")
-    else:
-        ativos = st.session_state.portfolio_sheets["ativos"]
-        fund_names = ativos["ATIVO"].tolist()
-        cod_col = find_col(ativos, "CÓD. ATIVO", "COD. ATIVO")
-
-        # ── Novo Movimento Individual ──
-        st.subheader("Novo Movimento")
-        with st.form("movement_form", clear_on_submit=True):
-            col1, col2 = st.columns(2)
-            with col1:
-                operation = st.selectbox("Operação", ["Resgate", "Aplicação"])
-                fund = st.selectbox("Fundo/Ativo", fund_names)
-            with col2:
-                value = st.number_input("Valor (R$)", min_value=0.01, step=10000.0, format="%.2f")
-                request_date = st.date_input("Data de Solicitação", value=datetime.today())
-
-            submitted = st.form_submit_button("➕ Adicionar Movimento", type="primary")
-
-            if submitted:
-                fund_row = ativos[ativos["ATIVO"] == fund].iloc[0]
-                fund_code = str(fund_row[cod_col]) if cod_col else None
-                mov = {
-                    "fund_name": fund,
-                    "fund_code": fund_code,
-                    "operation": operation,
-                    "value": value,
-                    "request_date": pd.Timestamp(request_date),
-                    "source": "manual",
-                }
-                # Compute liquidation date
-                liq_date, d_plus, matched = compute_liquidation_date_for_new_movement(mov, liquid_df)
-                mov["liquidation_date"] = liq_date
-                mov["description"] = f"{operation} manual - {fund[:40]}"
-
-                st.session_state.new_movements.append(mov)
-                st.success(
-                    f"✅ {operation} de R$ {value:,.2f} em **{fund[:40]}**\n\n"
-                    f"📅 Liquidação: **{liq_date.strftime('%d/%m/%Y')}** ({d_plus})"
-                )
-
-        # ── Realocação Rápida ──
         st.divider()
-        st.subheader("Realocação Rápida (Vender X → Comprar Y)")
 
-        with st.form("realloc_form", clear_on_submit=True):
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                sell_fund = st.selectbox("Resgatar de", fund_names, key="sell")
-            with col2:
-                buy_fund = st.selectbox("Aplicar em", fund_names, key="buy")
-            with col3:
-                realloc_value = st.number_input("Valor (R$)", min_value=0.01, step=10000.0, format="%.2f", key="rv")
-            realloc_date = st.date_input("Data de Solicitação", value=datetime.today(), key="rd")
-            realloc_submitted = st.form_submit_button("🔄 Realizar Realocação", type="primary")
+        # ── Plano de Realocação ──
+        st.subheader("📋 Plano de Realocação Sugerido")
 
-            if realloc_submitted:
-                sell_row = ativos[ativos["ATIVO"] == sell_fund].iloc[0]
-                buy_row = ativos[ativos["ATIVO"] == buy_fund].iloc[0]
-                sell_code = str(sell_row[cod_col]) if cod_col else None
-                buy_code = str(buy_row[cod_col]) if cod_col else None
+        plan_date = st.date_input(
+            "Data de execução do plano",
+            value=datetime.today(),
+            help="Data em que pretende solicitar os movimentos (afeta D+ e datas de liquidação)",
+        )
 
-                # Resgate
-                mov_sell = {
-                    "fund_name": sell_fund, "fund_code": sell_code,
-                    "operation": "Resgate", "value": realloc_value,
-                    "request_date": pd.Timestamp(realloc_date), "source": "manual",
-                    "description": f"Realocação: Resgate de {sell_fund[:30]}",
-                }
-                liq_sell, dp_sell, _ = compute_liquidation_date_for_new_movement(mov_sell, liquid_df)
-                mov_sell["liquidation_date"] = liq_sell
+        plan_df, plan_movements = generate_rebalancing_plan(
+            adherence_df, liquid_df, request_date=pd.Timestamp(plan_date)
+        )
 
-                # Aplicação
-                mov_buy = {
-                    "fund_name": buy_fund, "fund_code": buy_code,
-                    "operation": "Aplicação", "value": realloc_value,
-                    "request_date": pd.Timestamp(realloc_date), "source": "manual",
-                    "description": f"Realocação: Aplicação em {buy_fund[:30]}",
-                }
-                liq_buy, dp_buy, _ = compute_liquidation_date_for_new_movement(mov_buy, liquid_df)
-                mov_buy["liquidation_date"] = liq_buy
+        if not plan_df.empty:
+            st.markdown("*Prioridade: resgates primeiro (liberar caixa) → depois aplicações.*")
 
-                st.session_state.new_movements.append(mov_sell)
-                st.session_state.new_movements.append(mov_buy)
-
-                st.success(
-                    f"✅ Realocação cadastrada!\n\n"
-                    f"📤 Resgate de R$ {realloc_value:,.2f} de {sell_fund[:30]} → Liq: {liq_sell.strftime('%d/%m/%Y')} ({dp_sell})\n\n"
-                    f"📥 Aplicação de R$ {realloc_value:,.2f} em {buy_fund[:30]} → Liq: {liq_buy.strftime('%d/%m/%Y')} ({dp_buy})"
-                )
-
-        # ── Movimentos manuais cadastrados ──
-        st.divider()
-        new_movs = st.session_state.new_movements
-        st.subheader(f"Movimentos Manuais Cadastrados ({len(new_movs)})")
-
-        if new_movs:
-            mov_display = pd.DataFrame([{
-                "Fundo": m["fund_name"][:40],
-                "Operação": m["operation"],
-                "Valor (R$)": m["value"],
-                "Data Solicitação": m["request_date"].strftime("%d/%m/%Y"),
-                "Data Liquidação": m["liquidation_date"].strftime("%d/%m/%Y"),
-            } for m in new_movs])
-            st.dataframe(mov_display, use_container_width=True, hide_index=True)
+            # Resgates vs Aplicações side by side
+            resgates = plan_df[plan_df["Operação"] == "Resgate"]
+            aplicacoes = plan_df[plan_df["Operação"] == "Aplicação"]
 
             col1, col2 = st.columns(2)
             with col1:
-                if st.button("🗑️ Limpar Todos", type="secondary"):
-                    st.session_state.new_movements = []
-                    st.rerun()
+                st.markdown("**📤 Resgates:**")
+                if not resgates.empty:
+                    st.dataframe(
+                        resgates[["Prioridade", "Ativo", "Valor (R$)", "D+", "Data Liquidação"]].style.format({"Valor (R$)": "R$ {:,.0f}"}),
+                        use_container_width=True, hide_index=True,
+                    )
+                    st.metric("Total", f"R$ {resgates['Valor (R$)'].sum():,.0f}")
+                else:
+                    st.info("Nenhum resgate necessário.")
             with col2:
-                if st.button("↩️ Remover Último", type="secondary"):
-                    st.session_state.new_movements.pop()
-                    st.rerun()
+                st.markdown("**📥 Aplicações:**")
+                if not aplicacoes.empty:
+                    st.dataframe(
+                        aplicacoes[["Prioridade", "Ativo", "Valor (R$)", "D+", "Data Liquidação"]].style.format({"Valor (R$)": "R$ {:,.0f}"}),
+                        use_container_width=True, hide_index=True,
+                    )
+                    st.metric("Total", f"R$ {aplicacoes['Valor (R$)'].sum():,.0f}")
+                else:
+                    st.info("Nenhuma aplicação necessária.")
+
+            st.divider()
+
+            # ── Evolução: Provisões + Plano ──
+            st.subheader("📅 Projeção Completa (Provisões + Plano)")
+            st.caption("Como a carteira ficará em cada data de liquidação, incluindo provisões em andamento e o plano sugerido.")
+
+            combined_movements = all_movements + plan_movements
+            df_evo_fin, df_evo_pct, df_evo_mov = build_evolution_table(ativos, combined_movements, caixa_initial)
+
+            if df_evo_fin is not None:
+                evo_date_cols = [c for c in df_evo_fin.columns if c not in ["Ativo", "Código", "Atual (R$)"]]
+
+                # Build model map for color comparison
+                model_map = dict(zip(adherence_df["Ativo"].str[:45], adherence_df["% Alvo (Modelo)"]))
+
+                display_provisions_summary(combined_movements, expanded=False)
+                display_evolution_tables(df_evo_fin, df_evo_pct, evo_date_cols, model_map=model_map)
+
+                # Final comparison chart
+                if evo_date_cols:
+                    last_dc = evo_date_cols[-1]
+                    st.subheader(f"Comparação Final: {last_dc} vs Modelo")
+                    df_evo_pct_display = df_evo_pct.drop(columns=["Código"]).copy()
+                    df_evo_pct_display["🎯 Modelo"] = df_evo_pct_display["Ativo"].map(model_map).fillna(0)
+                    cmp = df_evo_pct_display[~df_evo_pct_display["Ativo"].isin(["📊 TOTAL PL"])].copy()
+                    fig_cmp = go.Figure()
+                    fig_cmp.add_trace(go.Bar(name=f"Projeção {last_dc}", x=cmp["Ativo"], y=cmp[last_dc], marker_color="#3498db"))
+                    fig_cmp.add_trace(go.Bar(name="🎯 Modelo", x=cmp["Ativo"], y=cmp["🎯 Modelo"], marker_color="#e67e22"))
+                    fig_cmp.update_layout(barmode="group", height=400, xaxis_tickangle=-30, yaxis_title="% PL")
+                    st.plotly_chart(fig_cmp, use_container_width=True)
+
+            # Export
+            st.divider()
+            excel_data = export_to_excel(df_evo_fin, df_evo_pct, df_evo_mov, carteira,
+                                          adherence_df=adherence_df, plan_df=plan_df)
+            st.download_button(
+                label="📥 Exportar Tudo para Excel",
+                data=excel_data,
+                file_name=f"plano_modelo_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+            )
         else:
-            st.info("Nenhum movimento manual cadastrado. Os movimentos das provisões já aparecem automaticamente na projeção.")
-
-        st.divider()
-        st.markdown("💡 **Dica:** Após cadastrar, vá em **📊 Projeção da Carteira** para ver como fica a carteira em cada data de liquidação.")
+            st.success("🎯 Carteira já está aderente ao modelo! Nenhuma movimentação necessária.")
 
 
-# ═════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
 # PAGE: DADOS DE LIQUIDAÇÃO
-# ═════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
+
 elif page == "📅 Dados de Liquidação":
     st.header("📅 Base de Dados de Liquidação")
     st.markdown(f"**{len(liquid_df)} fundos** carregados na base.")
