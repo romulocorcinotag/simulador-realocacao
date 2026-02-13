@@ -568,11 +568,17 @@ def build_adherence_analysis(ativos_df, model_df, all_movements, caixa_initial, 
     return df, info
 
 
-def generate_rebalancing_plan(adherence_df, liquid_df):
+def generate_rebalancing_plan(adherence_df, liquid_df, request_date=None):
     """
     Generate a step-by-step rebalancing plan with liquidation dates.
+    Returns plan_df and a list of movements (for evolution table).
     """
+    if request_date is None:
+        request_date = pd.Timestamp(datetime.today().date())
+
     plan = []
+    plan_movements = []
+
     for _, row in adherence_df.iterrows():
         if row["Código"] == "CAIXA":
             continue
@@ -587,23 +593,28 @@ def generate_rebalancing_plan(adherence_df, liquid_df):
         liq_info = match_fund_liquidation(name, code, liquid_df)
 
         if gap < 0:
-            # Need to redeem
             op = "Resgate"
             if liq_info is not None:
                 d_conv = int(liq_info["Conversão Resgate"])
                 d_liq = int(liq_info["Liquid. Resgate"])
                 contagem = str(liq_info.get("Contagem Resgate", "Úteis"))
+                if contagem not in ["Úteis", "Corridos"]:
+                    contagem = "Úteis"
                 d_plus = f"D+{d_conv}+{d_liq} ({contagem})"
+                cot_date = add_business_days(request_date, d_conv, contagem)
+                liq_date = add_business_days(cot_date, d_liq, contagem)
             else:
                 d_plus = "N/A"
+                liq_date = request_date
         else:
-            # Need to invest
             op = "Aplicação"
             if liq_info is not None:
                 d_conv = int(liq_info["Conversão Aplic."])
                 d_plus = f"D+{d_conv}"
+                liq_date = add_business_days(request_date, d_conv, "Úteis")
             else:
                 d_plus = "N/A"
+                liq_date = request_date
 
         plan.append({
             "Prioridade": len(plan) + 1,
@@ -612,11 +623,23 @@ def generate_rebalancing_plan(adherence_df, liquid_df):
             "Operação": op,
             "Valor (R$)": abs(gap),
             "D+": d_plus,
+            "Data Liquidação": liq_date.strftime("%d/%m/%Y"),
             "De % Atual": row["% Atual (Pós-Mov.)"],
             "Para % Alvo": row["% Alvo (Modelo)"],
         })
 
-    # Sort: resgates first (to free cash), then aplicações
+        # Build movement for evolution table
+        plan_movements.append({
+            "fund_name": name,
+            "fund_code": code,
+            "operation": op,
+            "value": abs(gap),
+            "request_date": request_date,
+            "liquidation_date": liq_date,
+            "description": f"Plano modelo: {op} {name[:30]}",
+            "source": "plano_modelo",
+        })
+
     plan_df = pd.DataFrame(plan)
     if not plan_df.empty:
         plan_df["_sort"] = plan_df["Operação"].map({"Resgate": 0, "Aplicação": 1})
@@ -624,7 +647,7 @@ def generate_rebalancing_plan(adherence_df, liquid_df):
         plan_df["Prioridade"] = range(1, len(plan_df) + 1)
         plan_df = plan_df.drop(columns=["_sort"])
 
-    return plan_df
+    return plan_df, plan_movements
 
 
 def export_to_excel(df_fin, df_pct, df_mov, carteira_info, adherence_df=None, plan_df=None):
@@ -1139,9 +1162,9 @@ elif page == "🎯 Carteira Modelo":
 
             # ── Rebalancing Plan ──
             st.subheader("📋 Plano de Realocação Sugerido")
-            st.markdown("*Resgates primeiro (liberar caixa) → depois Aplicações*")
+            st.markdown("*Resgates primeiro (liberar caixa) → depois Aplicações. Considera provisões já em andamento.*")
 
-            plan_df = generate_rebalancing_plan(adherence_df, liquid_df)
+            plan_df, plan_movements = generate_rebalancing_plan(adherence_df, liquid_df)
 
             if not plan_df.empty:
                 # Separate resgates and aplicações
@@ -1198,16 +1221,116 @@ elif page == "🎯 Carteira Modelo":
                     hide_index=True,
                 )
 
+                # ═══════════════════════════════════════════
+                # EVOLUTION TABLE: Provisões + Plano Modelo
+                # ═══════════════════════════════════════════
+                st.divider()
+                st.subheader("📅 Projeção da Carteira por Data de Liquidação")
+                st.markdown(
+                    "Visão completa: **provisões já em andamento** + **plano de realocação sugerido**. "
+                    "Mostra como a carteira ficará em cada data de liquidação futura."
+                )
+
+                # Combine: existing provisions + plan movements
+                combined_movements = all_movements + plan_movements
+
+                df_evo_fin, df_evo_pct, df_evo_mov = build_evolution_table(
+                    ativos, combined_movements, caixa_initial
+                )
+
+                if df_evo_fin is not None:
+                    evo_date_cols = [c for c in df_evo_fin.columns if c not in ["Ativo", "Código", "Atual (R$)"]]
+                    evo_total_row = df_evo_fin[df_evo_fin["Ativo"] == "📊 TOTAL PL"].iloc[0]
+
+                    # Summary metrics per date
+                    if evo_date_cols:
+                        st.markdown("**Resumo PL por data:**")
+                        mcols = st.columns(min(len(evo_date_cols) + 1, 7))
+                        with mcols[0]:
+                            st.metric("Hoje", f"R$ {evo_total_row['Atual (R$)']:,.0f}")
+                        for i, dc in enumerate(evo_date_cols[:6]):
+                            with mcols[min(i + 1, 6)]:
+                                val = evo_total_row[dc]
+                                delta = val - evo_total_row["Atual (R$)"]
+                                st.metric(dc, f"R$ {val:,.0f}", f"R$ {delta:,.0f}")
+
+                    # Movimentos considerados
+                    with st.expander(f"Ver {len(combined_movements)} movimentos (provisões + plano)", expanded=False):
+                        st.dataframe(df_evo_mov, use_container_width=True, hide_index=True)
+
+                    # Evolution R$ table
+                    st.markdown("**Evolução R$:**")
+                    fmt_fin = {"Atual (R$)": "R$ {:,.2f}"}
+                    for dc in evo_date_cols:
+                        fmt_fin[dc] = "R$ {:,.2f}"
+
+                    def hl_rows(row):
+                        if row["Ativo"] == "📊 TOTAL PL":
+                            return ["background-color: #1a3a5c; font-weight: bold"] * len(row)
+                        elif row["Ativo"] == "💰 CAIXA":
+                            return ["background-color: #2d4a1a"] * len(row)
+                        return [""] * len(row)
+
+                    st.dataframe(
+                        df_evo_fin.drop(columns=["Código"]).style.format(fmt_fin).apply(hl_rows, axis=1),
+                        use_container_width=True, hide_index=True, height=450,
+                    )
+
+                    # Evolution % table
+                    st.markdown("**Evolução % PL:**")
+                    fmt_pct = {"Atual (%)": "{:.2f}%"}
+                    for dc in evo_date_cols:
+                        fmt_pct[dc] = "{:.2f}%"
+
+                    # Add model target column for comparison
+                    df_evo_pct_display = df_evo_pct.drop(columns=["Código"]).copy()
+                    # Merge model target
+                    model_map = dict(zip(
+                        adherence_df["Ativo"].str[:45],
+                        adherence_df["% Alvo (Modelo)"]
+                    ))
+                    df_evo_pct_display["🎯 Modelo"] = df_evo_pct_display["Ativo"].map(model_map).fillna(0)
+                    fmt_pct["🎯 Modelo"] = "{:.2f}%"
+
+                    st.dataframe(
+                        df_evo_pct_display.style.format(fmt_pct).apply(hl_rows, axis=1),
+                        use_container_width=True, hide_index=True, height=450,
+                    )
+
+                    # Chart: last date vs model
+                    last_dc = evo_date_cols[-1] if evo_date_cols else None
+                    if last_dc:
+                        st.subheader(f"Comparação: Carteira Final ({last_dc}) vs Modelo")
+                        cmp = df_evo_pct_display[
+                            ~df_evo_pct_display["Ativo"].isin(["📊 TOTAL PL"])
+                        ].copy()
+                        fig_cmp = go.Figure()
+                        fig_cmp.add_trace(go.Bar(
+                            name=f"Projeção {last_dc}",
+                            x=cmp["Ativo"], y=cmp[last_dc],
+                            marker_color="#3498db",
+                        ))
+                        fig_cmp.add_trace(go.Bar(
+                            name="🎯 Modelo",
+                            x=cmp["Ativo"], y=cmp["🎯 Modelo"],
+                            marker_color="#e67e22",
+                        ))
+                        fig_cmp.update_layout(
+                            barmode="group", height=450,
+                            xaxis_tickangle=-30, yaxis_title="% PL",
+                        )
+                        st.plotly_chart(fig_cmp, use_container_width=True)
+
                 # Export
                 st.divider()
                 excel_data = export_to_excel(
-                    None, None, None,
+                    df_evo_fin, df_evo_pct, df_evo_mov,
                     carteira,
                     adherence_df=adherence_df,
                     plan_df=plan_df,
                 )
                 st.download_button(
-                    label="📥 Exportar Plano para Excel",
+                    label="📥 Exportar Tudo para Excel",
                     data=excel_data,
                     file_name=f"plano_realocacao_modelo_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
