@@ -135,8 +135,20 @@ def match_fund_liquidation(fund_name, fund_code, liquid_df):
 def extract_provisions_as_movements(provisoes_df, ativos_df):
     """
     Extract provisions from the portfolio file and convert them to movements.
-    Provisions with positive values = incoming cash (resgates liquidando)
-    Provisions with negative values = outgoing cash (passivos/débitos)
+
+    Three main types:
+    1. "Provisão de Crédito por movimentação de Cotas (XXXX)"
+       → Resgate de ativo já cotizando. Valor positivo.
+       → Subtrai do ativo (XXXX = id do ativo), entra no caixa.
+       → Operação: "Resgate (Cotizando)"
+
+    2. "Débito referente a Movimento Carteira"
+       → Resgate de passivo = investidores do fundo resgatando.
+       → Valor negativo. Dinheiro sai do PL (caixa diminui, PL diminui).
+       → Operação: "Resgate Passivo"
+
+    3. Outros débitos/créditos (taxas, IR, etc.)
+       → Operação: "Débito/Passivo" ou "Crédito"
     """
     movements = []
     if provisoes_df is None or provisoes_df.empty:
@@ -170,6 +182,8 @@ def extract_provisions_as_movements(provisoes_df, ativos_df):
         if pd.isna(data_liq) or pd.isna(valor):
             continue
 
+        desc_upper = desc.upper()
+
         # Try to extract fund code from description like "(1103)" or "(394)"
         code_match = re.search(r'\((\d+)\)', desc)
         fund_code = code_match.group(1) if code_match else None
@@ -181,13 +195,28 @@ def extract_provisions_as_movements(provisoes_df, ativos_df):
             if not asset_match.empty:
                 fund_name = str(asset_match.iloc[0].get("ATIVO", ""))
 
-        # Determine type
-        if valor > 0:
-            # Positive = incoming cash (resgate de fundo liquidando)
-            op_type = "Resgate (Provisão)"
+        # ── Classify provision type ──
+        if "MOVIMENTAÇÃO DE COTAS" in desc_upper or "MOVIMENTACAO DE COTAS" in desc_upper:
+            # Type 1: Resgate de ativo já cotizando
+            # "Provisão de Crédito por movimentação de Cotas (1360)"
+            # Positive value = cash incoming from fund redemption in progress
+            op_type = "Resgate (Cotizando)"
+            source = "provisao_resgate_ativo"
+
+        elif "MOVIMENTO CARTEIRA" in desc_upper or "MOV. CARTEIRA" in desc_upper or "MOV CARTEIRA" in desc_upper:
+            # Type 2: Resgate de passivo = investidores do fundo resgatando
+            # "Débito referente a Movimento Carteira"
+            # Negative value = cash leaving the fund (PL shrinks)
+            op_type = "Resgate Passivo"
+            source = "provisao_resgate_passivo"
+
+        elif valor > 0:
+            # Other positive: generic credit
+            op_type = "Crédito (Provisão)"
             source = "provisao_credito"
+
         else:
-            # Negative = outgoing cash (débito/passivo)
+            # Other negative: generic debit (tax, fees, etc.)
             op_type = "Débito/Passivo"
             source = "provisao_debito"
 
@@ -296,8 +325,12 @@ def build_evolution_table(ativos_df, all_movements, caixa_initial):
                         matched_code = a["code"]
                         break
 
-            if "Resgate" in op or op == "Resgate (Provisão)":
-                # Resgate: subtract from fund, add to caixa
+            if op == "Resgate Passivo":
+                # Resgate passivo: investidores do fundo resgatando
+                # Dinheiro sai do PL (caixa diminui, PL total diminui)
+                caixa_adj -= value
+            elif op == "Resgate (Cotizando)" or op == "Resgate (Provisão)" or op == "Resgate":
+                # Resgate de ativo: subtrai do fundo, entra no caixa
                 if matched_code:
                     date_adjustments[d][matched_code] = date_adjustments[d].get(matched_code, 0) - value
                 caixa_adj += value
@@ -307,8 +340,11 @@ def build_evolution_table(ativos_df, all_movements, caixa_initial):
                     date_adjustments[d][matched_code] = date_adjustments[d].get(matched_code, 0) + value
                 caixa_adj -= value
             elif op == "Débito/Passivo":
-                # Débito: subtract from caixa
+                # Débito genérico: subtract from caixa (taxa, IR, etc.)
                 caixa_adj -= value
+            elif op == "Crédito (Provisão)":
+                # Crédito genérico: add to caixa
+                caixa_adj += value
 
         caixa_adjustments[d] = caixa_adj
 
@@ -462,7 +498,11 @@ def build_adherence_analysis(ativos_df, model_df, all_movements, caixa_initial, 
         value = mov["value"]
         op = mov["operation"]
 
-        if "Resgate" in op:
+        if op == "Resgate Passivo":
+            # Investidores resgatando do fundo: dinheiro sai do PL
+            caixa -= value
+        elif op in ("Resgate (Cotizando)", "Resgate (Provisão)", "Resgate"):
+            # Resgate de ativo: subtrai do fundo, entra no caixa
             if fund_code in positions:
                 positions[fund_code]["financeiro"] -= value
             caixa += value
@@ -471,7 +511,10 @@ def build_adherence_analysis(ativos_df, model_df, all_movements, caixa_initial, 
                 positions[fund_code]["financeiro"] += value
             caixa -= value
         elif op == "Débito/Passivo":
+            # Débito genérico (taxa, IR, etc.)
             caixa -= value
+        elif op == "Crédito (Provisão)":
+            caixa += value
 
     # Total PL after movements
     total_after = sum(p["financeiro"] for p in positions.values()) + caixa
@@ -763,12 +806,35 @@ if page == "📂 Importar Carteira":
                 st.subheader("📌 Movimentos Pendentes Extraídos das Provisões")
                 prov_df = pd.DataFrame([{
                     "Fundo": m["fund_name"][:45],
-                    "Operação": m["operation"],
+                    "Tipo": m["operation"],
                     "Valor (R$)": m["value"],
                     "Data Liquidação": m["liquidation_date"].strftime("%d/%m/%Y"),
                     "Descrição": m["description"][:60],
                 } for m in prov_movements])
-                st.dataframe(prov_df, use_container_width=True, hide_index=True)
+
+                def color_prov_type(row):
+                    tipo = row["Tipo"]
+                    if tipo == "Resgate (Cotizando)":
+                        return ["background-color: #1a3a5c"] * len(row)
+                    elif tipo == "Resgate Passivo":
+                        return ["background-color: #5c3a1a"] * len(row)
+                    elif tipo == "Débito/Passivo":
+                        return ["background-color: #3a1a3a"] * len(row)
+                    return [""] * len(row)
+
+                st.dataframe(
+                    prov_df.style.format({"Valor (R$)": "R$ {:,.2f}"}).apply(color_prov_type, axis=1),
+                    use_container_width=True, hide_index=True,
+                )
+                # Summary
+                n_cotiz = len([m for m in prov_movements if m["operation"] == "Resgate (Cotizando)"])
+                n_pass = len([m for m in prov_movements if m["operation"] == "Resgate Passivo"])
+                n_outros = len(prov_movements) - n_cotiz - n_pass
+                st.caption(
+                    f"🔄 {n_cotiz} resgates cotizando · "
+                    f"📤 {n_pass} resgates passivo · "
+                    f"💳 {n_outros} débitos/créditos"
+                )
 
             # Show match with liquidation data
             st.subheader("Correspondência com dados de liquidação")
@@ -1005,8 +1071,11 @@ elif page == "📊 Projeção da Carteira":
                         timeline_data, x_start="Data Solicitação", x_end="Data Liquidação",
                         y="Label", color="Operação",
                         color_discrete_map={
+                            "Resgate (Cotizando)": "#e74c3c",
                             "Resgate (Provisão)": "#e74c3c",
+                            "Resgate Passivo": "#e67e22",
                             "Débito/Passivo": "#9b59b6",
+                            "Crédito (Provisão)": "#3498db",
                             "Resgate": "#e74c3c",
                             "Aplicação": "#2ecc71",
                         },
@@ -1091,11 +1160,76 @@ elif page == "🎯 Carteira Modelo":
 
             st.divider()
 
+            # ── Show provisions in progress ──
+            if all_movements:
+                resgates_cotizando = [m for m in all_movements if m["operation"] == "Resgate (Cotizando)"]
+                resgates_passivo = [m for m in all_movements if m["operation"] == "Resgate Passivo"]
+                debitos_outros = [m for m in all_movements if m["operation"] in ("Débito/Passivo", "Crédito (Provisão)")]
+
+                st.subheader("📌 Movimentos Pendentes (já em andamento)")
+
+                if resgates_cotizando:
+                    st.markdown("**🔄 Resgates de Ativos Cotizando** *(já solicitados, aguardando liquidação)*")
+                    cotiz_df = pd.DataFrame([{
+                        "Ativo": m["fund_name"][:45],
+                        "Código": m.get("fund_code", ""),
+                        "Valor (R$)": m["value"],
+                        "Data Operação": m["request_date"].strftime("%d/%m/%Y"),
+                        "Data Liquidação": m["liquidation_date"].strftime("%d/%m/%Y"),
+                    } for m in resgates_cotizando])
+                    st.dataframe(
+                        cotiz_df.style.format({"Valor (R$)": "R$ {:,.2f}"}),
+                        use_container_width=True, hide_index=True,
+                    )
+                    total_cotiz = sum(m["value"] for m in resgates_cotizando)
+                    st.caption(f"Total resgates cotizando: **R$ {total_cotiz:,.2f}**")
+
+                if resgates_passivo:
+                    st.markdown("**📤 Resgates de Passivo** *(investidores do fundo resgatando — reduz o PL)*")
+                    passivo_df = pd.DataFrame([{
+                        "Descrição": m["description"][:60],
+                        "Valor (R$)": m["value"],
+                        "Data Operação": m["request_date"].strftime("%d/%m/%Y"),
+                        "Data Liquidação": m["liquidation_date"].strftime("%d/%m/%Y"),
+                    } for m in resgates_passivo])
+                    st.dataframe(
+                        passivo_df.style.format({"Valor (R$)": "R$ {:,.2f}"}),
+                        use_container_width=True, hide_index=True,
+                    )
+                    total_passivo = sum(m["value"] for m in resgates_passivo)
+                    st.caption(f"Total resgates passivo: **R$ {total_passivo:,.2f}** *(sai do PL)*")
+
+                if debitos_outros:
+                    st.markdown("**💳 Outros Débitos/Créditos** *(taxas, IR, etc.)*")
+                    outros_df = pd.DataFrame([{
+                        "Descrição": m["description"][:60],
+                        "Tipo": m["operation"],
+                        "Valor (R$)": m["value"],
+                        "Data Liquidação": m["liquidation_date"].strftime("%d/%m/%Y"),
+                    } for m in debitos_outros])
+                    st.dataframe(
+                        outros_df.style.format({"Valor (R$)": "R$ {:,.2f}"}),
+                        use_container_width=True, hide_index=True,
+                    )
+
+                st.divider()
+
             # ── Adherence Analysis ──
             st.subheader("📊 Análise de Aderência (Pós-Movimentos Pendentes)")
 
             if all_movements:
-                st.info(f"Considerando **{len(all_movements)} movimentos pendentes** (provisões + manuais) antes de comparar com o modelo.")
+                n_cotiz = len([m for m in all_movements if m["operation"] == "Resgate (Cotizando)"])
+                n_pass = len([m for m in all_movements if m["operation"] == "Resgate Passivo"])
+                n_outros = len([m for m in all_movements if m["operation"] in ("Débito/Passivo", "Crédito (Provisão)")])
+                parts = []
+                if n_cotiz:
+                    parts.append(f"{n_cotiz} resgates cotizando")
+                if n_pass:
+                    parts.append(f"{n_pass} resgates passivo")
+                if n_outros:
+                    parts.append(f"{n_outros} débitos/créditos")
+                summary = ", ".join(parts)
+                st.info(f"Considerando **{len(all_movements)} movimentos pendentes** ({summary}) antes de comparar com o modelo.")
 
             adherence_df, info = build_adherence_analysis(
                 ativos, model_df, all_movements, caixa_initial, pl_total
