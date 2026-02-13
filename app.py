@@ -12,13 +12,192 @@ import os
 # CONFIG
 # ─────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Simulador de Realocação",
-    page_icon="📊",
+    page_title="Simulador de Realocação · TAG Investimentos",
+    page_icon="https://taginvest.com.br/favicon.ico",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 DADOS_LIQUID_PATH = os.path.join(os.path.dirname(__file__), "Dados de liquid.xlsx")
+
+# ─────────────────────────────────────────────────────────
+# TAG BRAND IDENTITY
+# ─────────────────────────────────────────────────────────
+# From TAG Investimentos Brand Guide 2021
+TAG = {
+    "vermelho": "#630D24",
+    "vermelho_light": "#8B1A3A",
+    "vermelho_dark": "#3D0816",
+    "offwhite": "#E6E4DB",
+    "laranja": "#FF8853",
+    "laranja_dark": "#E06B35",
+    "bg_dark": "#1A0A10",
+    "bg_card": "#2A1520",
+    "bg_card_alt": "#321A28",
+    "text": "#E6E4DB",
+    "text_muted": "#9A9590",
+    # Paleta de gráficos (oficial do brand guide)
+    "chart": ["#FF8853", "#5C85F7", "#6BDE97", "#FFBB00", "#ED5A6E",
+              "#58C6F5", "#A485F2", "#477C88", "#002A6E", "#6A6864"],
+}
+
+# Plotly template
+PLOTLY_LAYOUT = dict(
+    paper_bgcolor="rgba(0,0,0,0)",
+    plot_bgcolor="rgba(0,0,0,0)",
+    font=dict(family="Tahoma, sans-serif", color=TAG["offwhite"], size=12),
+    margin=dict(t=40, b=40, l=40, r=20),
+    xaxis=dict(gridcolor="rgba(230,228,219,0.08)", zerolinecolor="rgba(230,228,219,0.08)"),
+    yaxis=dict(gridcolor="rgba(230,228,219,0.08)", zerolinecolor="rgba(230,228,219,0.08)"),
+    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=11)),
+    colorway=TAG["chart"],
+)
+
+# ─────────────────────────────────────────────────────────
+# CUSTOM CSS
+# ─────────────────────────────────────────────────────────
+st.markdown(f"""
+<style>
+    /* ── Typography ── */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+    html, body, [class*="css"] {{
+        font-family: 'Inter', 'Tahoma', sans-serif;
+    }}
+
+    /* ── Sidebar ── */
+    [data-testid="stSidebar"] {{
+        background: linear-gradient(180deg, {TAG["vermelho_dark"]} 0%, {TAG["bg_dark"]} 100%);
+        border-right: 1px solid {TAG["vermelho"]}33;
+    }}
+    [data-testid="stSidebar"] .stRadio label {{
+        font-size: 0.9rem;
+        padding: 6px 0;
+    }}
+
+    /* ── Headers ── */
+    h1 {{
+        color: {TAG["offwhite"]} !important;
+        font-weight: 600 !important;
+        letter-spacing: -0.02em;
+        border-bottom: 2px solid {TAG["laranja"]}40;
+        padding-bottom: 12px !important;
+    }}
+    h2, h3 {{
+        color: {TAG["offwhite"]} !important;
+        font-weight: 500 !important;
+    }}
+
+    /* ── Metrics ── */
+    [data-testid="stMetric"] {{
+        background: linear-gradient(135deg, {TAG["bg_card"]} 0%, {TAG["bg_card_alt"]} 100%);
+        border: 1px solid {TAG["vermelho"]}30;
+        border-radius: 12px;
+        padding: 16px 20px;
+        box-shadow: 0 4px 16px rgba(99,13,36,0.15);
+    }}
+    [data-testid="stMetric"] label {{
+        color: {TAG["text_muted"]} !important;
+        font-size: 0.8rem !important;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }}
+    [data-testid="stMetric"] [data-testid="stMetricValue"] {{
+        color: {TAG["offwhite"]} !important;
+        font-weight: 600 !important;
+    }}
+
+    /* ── Expanders ── */
+    .streamlit-expanderHeader {{
+        background: {TAG["bg_card"]} !important;
+        border: 1px solid {TAG["vermelho"]}25 !important;
+        border-radius: 8px !important;
+        color: {TAG["offwhite"]} !important;
+    }}
+
+    /* ── Dataframes ── */
+    [data-testid="stDataFrame"] {{
+        border: 1px solid {TAG["vermelho"]}20;
+        border-radius: 8px;
+        overflow: hidden;
+    }}
+
+    /* ── Buttons ── */
+    .stButton > button[kind="primary"] {{
+        background: linear-gradient(135deg, {TAG["laranja"]} 0%, {TAG["laranja_dark"]} 100%) !important;
+        color: white !important;
+        border: none !important;
+        font-weight: 600 !important;
+        border-radius: 8px !important;
+        box-shadow: 0 4px 12px rgba(255,136,83,0.3) !important;
+    }}
+    .stButton > button[kind="primary"]:hover {{
+        box-shadow: 0 6px 20px rgba(255,136,83,0.5) !important;
+        transform: translateY(-1px);
+    }}
+    .stDownloadButton > button {{
+        background: linear-gradient(135deg, {TAG["vermelho"]} 0%, {TAG["vermelho_dark"]} 100%) !important;
+        color: {TAG["offwhite"]} !important;
+        border: none !important;
+        font-weight: 600 !important;
+        border-radius: 8px !important;
+    }}
+
+    /* ── Tabs ── */
+    .stTabs [data-baseweb="tab-list"] {{
+        gap: 8px;
+        border-bottom: 2px solid {TAG["vermelho"]}30;
+    }}
+    .stTabs [data-baseweb="tab"] {{
+        border-radius: 8px 8px 0 0;
+        padding: 8px 24px;
+        font-weight: 500;
+    }}
+    .stTabs [aria-selected="true"] {{
+        background: {TAG["vermelho"]}20 !important;
+        border-bottom: 3px solid {TAG["laranja"]} !important;
+    }}
+
+    /* ── Dividers ── */
+    hr {{
+        border-color: {TAG["vermelho"]}25 !important;
+    }}
+
+    /* ── Info/Warning boxes ── */
+    [data-testid="stAlert"] {{
+        border-radius: 8px;
+    }}
+
+    /* ── File uploader ── */
+    [data-testid="stFileUploader"] {{
+        border: 2px dashed {TAG["vermelho"]}40 !important;
+        border-radius: 12px !important;
+        padding: 20px !important;
+    }}
+
+    /* ── Captions in sidebar ── */
+    [data-testid="stSidebar"] .stCaption {{
+        color: {TAG["text_muted"]} !important;
+    }}
+
+    /* ── Legend bar ── */
+    .tag-legend {{
+        display: flex;
+        gap: 20px;
+        font-size: 0.82rem;
+        margin-top: 8px;
+        padding: 8px 12px;
+        background: {TAG["bg_card"]};
+        border-radius: 8px;
+        border: 1px solid {TAG["vermelho"]}20;
+    }}
+
+    /* ── Hide default decoration ── */
+    #MainMenu {{visibility: hidden;}}
+    footer {{visibility: hidden;}}
+    header {{visibility: hidden;}}
+</style>
+""", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────
 # HELPERS
@@ -760,11 +939,11 @@ def display_provisions_summary(movements, expanded=False):
 
 
 def style_evolution_table_rows(row):
-    """Style function for evolution table rows (highlights TOTAL and CAIXA)."""
+    """Style function for evolution table rows (TAG brand)."""
     if row["Ativo"] == "📊 TOTAL PL":
-        return ["background-color: #1a3a5c; font-weight: bold"] * len(row)
+        return [f"background-color: {TAG['vermelho']}40; font-weight: bold; color: {TAG['offwhite']}"] * len(row)
     elif row["Ativo"] == "💰 CAIXA":
-        return ["background-color: #2d4a1a"] * len(row)
+        return [f"background-color: {TAG['bg_card_alt']}; color: {TAG['offwhite']}"] * len(row)
     return [""] * len(row)
 
 
@@ -813,24 +992,27 @@ def display_evolution_tables(df_fin, df_pct, evo_date_cols, model_map=None):
             target = model_map.get(ativo, None)
             for col in row.index:
                 if ativo == "📊 TOTAL PL":
-                    styles.append("background-color: #1a3a5c; font-weight: bold")
+                    styles.append(f"background-color: {TAG['vermelho']}40; font-weight: bold; color: {TAG['offwhite']}")
                 elif ativo == "💰 CAIXA":
-                    styles.append("background-color: #2d4a1a")
+                    styles.append(f"background-color: {TAG['bg_card_alt']}; color: {TAG['offwhite']}")
                 elif col in pct_value_cols and target is not None:
                     val = row[col]
                     diff = val - target
                     if abs(diff) < 0.5:
-                        styles.append("background-color: #1a4a2a; color: #a3d9a5")
+                        # On target → green
+                        styles.append("background-color: rgba(107,222,151,0.15); color: #6BDE97")
                     elif diff > 0:
+                        # Overweight → blue (TAG chart blue)
                         intensity = min(abs(diff) / 5.0, 1.0)
-                        b = int(90 + 50 * intensity)
-                        styles.append(f"background-color: rgb(26, 58, {b}); color: #a5c8f5")
+                        alpha = 0.12 + 0.18 * intensity
+                        styles.append(f"background-color: rgba(92,133,247,{alpha:.2f}); color: #5C85F7")
                     else:
+                        # Underweight → TAG vermelho
                         intensity = min(abs(diff) / 5.0, 1.0)
-                        r = int(90 + 50 * intensity)
-                        styles.append(f"background-color: rgb({r}, 26, 26); color: #f5a5a5")
+                        alpha = 0.12 + 0.18 * intensity
+                        styles.append(f"background-color: rgba(237,90,110,{alpha:.2f}); color: #ED5A6E")
                 elif col == "🎯 Modelo":
-                    styles.append("background-color: #3a3a1a; color: #f5e6a5; font-weight: bold")
+                    styles.append(f"background-color: rgba(255,136,83,0.12); color: {TAG['laranja']}; font-weight: 600")
                 else:
                     styles.append("")
             return styles
@@ -840,12 +1022,12 @@ def display_evolution_tables(df_fin, df_pct, evo_date_cols, model_map=None):
             use_container_width=True, hide_index=True, height=420,
         )
         st.markdown(
-            "<div style='display:flex; gap:20px; font-size:0.85em; margin-top:4px;'>"
-            "<span>🟢 <b>Aderente</b> (±0.5 p.p.)</span>"
-            "<span>🔵 <b>Acima</b> do modelo</span>"
-            "<span>🔴 <b>Abaixo</b> do modelo</span>"
-            "<span>🎯 <b>Modelo</b> = % alvo</span>"
-            "</div>",
+            f"<div class='tag-legend'>"
+            f"<span style='color:#6BDE97'>● <b>Aderente</b> (±0.5 p.p.)</span>"
+            f"<span style='color:#5C85F7'>● <b>Acima</b> do modelo</span>"
+            f"<span style='color:#ED5A6E'>● <b>Abaixo</b> do modelo</span>"
+            f"<span style='color:{TAG['laranja']}'>● <b>Modelo</b> = % alvo</span>"
+            f"</div>",
             unsafe_allow_html=True,
         )
     else:
@@ -893,8 +1075,18 @@ if "model_loaded" not in st.session_state:
 # ═══════════════════════════════════════════════════════════
 
 with st.sidebar:
-    st.title("📊 Simulador de Realocação")
-    st.caption("TAG Investimentos")
+    st.markdown(
+        f"""<div style='text-align:center; padding: 8px 0 16px 0;'>
+        <div style='font-size:1.5rem; font-weight:700; color:{TAG["offwhite"]}; letter-spacing:-0.03em;'>
+        TAG</div>
+        <div style='font-size:0.7rem; text-transform:uppercase; letter-spacing:0.15em; color:{TAG["text_muted"]}; margin-top:-4px;'>
+        Investimentos</div>
+        <div style='width:40px; height:2px; background:{TAG["laranja"]}; margin:10px auto 0;'></div>
+        <div style='font-size:0.75rem; color:{TAG["laranja"]}; margin-top:8px; font-weight:500;'>
+        Simulador de Realocação</div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
     st.divider()
 
     page = st.radio(
@@ -937,7 +1129,7 @@ with st.sidebar:
 # ═══════════════════════════════════════════════════════════
 
 if page == "📂 Importar Dados":
-    st.header("📂 Importar Dados")
+    st.header("Importar Dados")
 
     tab_carteira, tab_modelo = st.tabs(["📁 Carteira (Posição Projetada)", "🎯 Carteira Modelo"])
 
@@ -1037,9 +1229,11 @@ if page == "📂 Importar Dados":
                     use_container_width=True, hide_index=True,
                 )
             with col2:
-                fig = px.pie(model_df, values="% Alvo", names="Ativo", hole=0.4)
-                fig.update_traces(textposition="inside", textinfo="percent+label")
-                fig.update_layout(height=300, showlegend=False, margin=dict(t=10, b=10))
+                fig = px.pie(model_df, values="% Alvo", names="Ativo", hole=0.45,
+                             color_discrete_sequence=TAG["chart"])
+                fig.update_traces(textposition="inside", textinfo="percent+label",
+                                  textfont_size=10, marker=dict(line=dict(color=TAG["bg_dark"], width=2)))
+                fig.update_layout(**PLOTLY_LAYOUT, height=300, showlegend=False)
                 st.plotly_chart(fig, use_container_width=True)
 
 
@@ -1048,7 +1242,7 @@ if page == "📂 Importar Dados":
 # ═══════════════════════════════════════════════════════════
 
 elif page == "📋 Posição Atual":
-    st.header("📋 Posição Atual da Carteira")
+    st.header("Posição Atual da Carteira")
 
     ctx = get_portfolio_context()
     if not ctx:
@@ -1091,17 +1285,21 @@ elif page == "📋 Posição Atual":
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("Alocação por Ativo")
-            fig = px.pie(ativos, values="FINANCEIRO", names="ATIVO", hole=0.4)
-            fig.update_traces(textposition="inside", textinfo="percent+label")
-            fig.update_layout(height=400, showlegend=False)
+            fig = px.pie(ativos, values="FINANCEIRO", names="ATIVO", hole=0.45,
+                         color_discrete_sequence=TAG["chart"])
+            fig.update_traces(textposition="inside", textinfo="percent+label",
+                              textfont_size=11, marker=dict(line=dict(color=TAG["bg_dark"], width=2)))
+            fig.update_layout(**PLOTLY_LAYOUT, height=400, showlegend=False)
             st.plotly_chart(fig, use_container_width=True)
         with col2:
             strat_col = find_col(ativos, "ESTRATÉGIA", "ESTRATEGIA")
             if strat_col and strat_col in ativos.columns:
                 st.subheader("Alocação por Estratégia")
                 strat = ativos.groupby(strat_col)["FINANCEIRO"].sum().reset_index()
-                fig2 = px.bar(strat, x=strat_col, y="FINANCEIRO", text_auto=",.0f")
-                fig2.update_layout(xaxis_tickangle=-45, height=400)
+                fig2 = px.bar(strat, x=strat_col, y="FINANCEIRO", text_auto=",.0f",
+                              color_discrete_sequence=[TAG["laranja"]])
+                fig2.update_layout(**PLOTLY_LAYOUT, xaxis_tickangle=-45, height=400)
+                fig2.update_traces(marker_line_width=0, textfont_color=TAG["offwhite"])
                 st.plotly_chart(fig2, use_container_width=True)
 
         # Provisões
@@ -1115,7 +1313,7 @@ elif page == "📋 Posição Atual":
 # ═══════════════════════════════════════════════════════════
 
 elif page == "📊 Projeção da Carteira":
-    st.header("📊 Projeção da Carteira")
+    st.header("Projeção da Carteira")
 
     ctx = get_portfolio_context()
     if not ctx:
@@ -1201,9 +1399,12 @@ elif page == "📊 Projeção da Carteira":
                 if last_date_col:
                     chart_df = df_pct[~df_pct["Ativo"].isin(["📊 TOTAL PL"])].copy()
                     fig = go.Figure()
-                    fig.add_trace(go.Bar(name="Hoje", x=chart_df["Ativo"], y=chart_df["Atual (%)"], marker_color="#3498db"))
-                    fig.add_trace(go.Bar(name=last_date_col, x=chart_df["Ativo"], y=chart_df[last_date_col], marker_color="#e67e22"))
-                    fig.update_layout(barmode="group", height=400, xaxis_tickangle=-30, yaxis_title="% PL")
+                    fig.add_trace(go.Bar(name="Hoje", x=chart_df["Ativo"], y=chart_df["Atual (%)"],
+                                         marker_color=TAG["chart"][1], marker_line_width=0))
+                    fig.add_trace(go.Bar(name=last_date_col, x=chart_df["Ativo"], y=chart_df[last_date_col],
+                                         marker_color=TAG["laranja"], marker_line_width=0))
+                    fig.update_layout(**PLOTLY_LAYOUT, barmode="group", height=400,
+                                      xaxis_tickangle=-30, yaxis_title="% PL")
                     st.plotly_chart(fig, use_container_width=True)
 
                 # Timeline
@@ -1225,12 +1426,15 @@ elif page == "📊 Projeção da Carteira":
                         timeline_data, x_start="Data Solicitação", x_end="Data Liquidação",
                         y="Label", color="Operação",
                         color_discrete_map={
-                            "Resgate (Cotizando)": "#e74c3c", "Resgate Passivo": "#e67e22",
-                            "Débito/Passivo": "#9b59b6", "Crédito (Provisão)": "#3498db",
-                            "Resgate": "#c0392b", "Aplicação": "#2ecc71",
+                            "Resgate (Cotizando)": TAG["chart"][4],  # ED5A6E
+                            "Resgate Passivo": TAG["laranja"],
+                            "Débito/Passivo": TAG["chart"][6],  # A485F2
+                            "Crédito (Provisão)": TAG["chart"][5],  # 58C6F5
+                            "Resgate": TAG["vermelho_light"],
+                            "Aplicação": TAG["chart"][2],  # 6BDE97
                         },
                     )
-                    fig_tl.update_layout(height=max(300, len(timeline_data) * 40), yaxis_title="")
+                    fig_tl.update_layout(**PLOTLY_LAYOUT, height=max(300, len(timeline_data) * 40), yaxis_title="")
                     st.plotly_chart(fig_tl, use_container_width=True)
 
                 # Export
@@ -1250,7 +1454,7 @@ elif page == "📊 Projeção da Carteira":
 # ═══════════════════════════════════════════════════════════
 
 elif page == "🎯 Carteira Modelo":
-    st.header("🎯 Aderência à Carteira Modelo")
+    st.header("Aderência à Carteira Modelo")
 
     ctx = get_portfolio_context()
     if not ctx:
@@ -1294,13 +1498,15 @@ elif page == "🎯 Carteira Modelo":
         def color_gap(row):
             gap = row["Gap (p.p.)"]
             if row["Ativo"] == "💰 CAIXA":
-                return ["background-color: #2d4a1a"] * len(row)
+                return [f"background-color: {TAG['bg_card_alt']}"] * len(row)
             if abs(gap) < 0.5:
-                return ["background-color: #1a3a1a"] * len(row)
+                return ["background-color: rgba(107,222,151,0.10)"] * len(row)
             elif gap > 0:
-                return ["background-color: #1a3a5c"] * len(row)
+                # Need to apply (underweight - modelo wants more)
+                return ["background-color: rgba(92,133,247,0.12)"] * len(row)
             else:
-                return ["background-color: #5c1a1a"] * len(row)
+                # Need to redeem (overweight)
+                return ["background-color: rgba(237,90,110,0.12)"] * len(row)
 
         st.dataframe(
             adherence_df.style
@@ -1318,9 +1524,14 @@ elif page == "🎯 Carteira Modelo":
         # Gap chart
         chart_data = adherence_df[adherence_df["Código"] != "CAIXA"].copy()
         fig_gap = go.Figure()
-        fig_gap.add_trace(go.Bar(name="% Atual", x=chart_data["Ativo"], y=chart_data["% Atual (Pós-Mov.)"], marker_color="#3498db"))
-        fig_gap.add_trace(go.Bar(name="% Modelo", x=chart_data["Ativo"], y=chart_data["% Alvo (Modelo)"], marker_color="#e67e22"))
-        fig_gap.update_layout(barmode="group", height=400, xaxis_tickangle=-30, yaxis_title="% PL")
+        fig_gap.add_trace(go.Bar(name="% Atual", x=chart_data["Ativo"],
+                                  y=chart_data["% Atual (Pós-Mov.)"],
+                                  marker_color=TAG["chart"][1], marker_line_width=0))
+        fig_gap.add_trace(go.Bar(name="% Modelo", x=chart_data["Ativo"],
+                                  y=chart_data["% Alvo (Modelo)"],
+                                  marker_color=TAG["laranja"], marker_line_width=0))
+        fig_gap.update_layout(**PLOTLY_LAYOUT, barmode="group", height=400,
+                              xaxis_tickangle=-30, yaxis_title="% PL")
         st.plotly_chart(fig_gap, use_container_width=True)
 
         st.divider()
@@ -1393,9 +1604,12 @@ elif page == "🎯 Carteira Modelo":
                     df_evo_pct_display["🎯 Modelo"] = df_evo_pct_display["Ativo"].map(model_map).fillna(0)
                     cmp = df_evo_pct_display[~df_evo_pct_display["Ativo"].isin(["📊 TOTAL PL"])].copy()
                     fig_cmp = go.Figure()
-                    fig_cmp.add_trace(go.Bar(name=f"Projeção {last_dc}", x=cmp["Ativo"], y=cmp[last_dc], marker_color="#3498db"))
-                    fig_cmp.add_trace(go.Bar(name="🎯 Modelo", x=cmp["Ativo"], y=cmp["🎯 Modelo"], marker_color="#e67e22"))
-                    fig_cmp.update_layout(barmode="group", height=400, xaxis_tickangle=-30, yaxis_title="% PL")
+                    fig_cmp.add_trace(go.Bar(name=f"Projeção {last_dc}", x=cmp["Ativo"], y=cmp[last_dc],
+                                              marker_color=TAG["chart"][1], marker_line_width=0))
+                    fig_cmp.add_trace(go.Bar(name="🎯 Modelo", x=cmp["Ativo"], y=cmp["🎯 Modelo"],
+                                              marker_color=TAG["laranja"], marker_line_width=0))
+                    fig_cmp.update_layout(**PLOTLY_LAYOUT, barmode="group", height=400,
+                                          xaxis_tickangle=-30, yaxis_title="% PL")
                     st.plotly_chart(fig_cmp, use_container_width=True)
 
             # Export
@@ -1418,7 +1632,7 @@ elif page == "🎯 Carteira Modelo":
 # ═══════════════════════════════════════════════════════════
 
 elif page == "📅 Dados de Liquidação":
-    st.header("📅 Base de Dados de Liquidação")
+    st.header("Base de Dados de Liquidação")
     st.markdown(f"**{len(liquid_df)} fundos** carregados na base.")
 
     col1, col2, col3 = st.columns(3)
@@ -1461,8 +1675,12 @@ elif page == "📅 Dados de Liquidação":
     st.subheader("Estatísticas de Liquidação")
     col1, col2 = st.columns(2)
     with col1:
-        fig = px.histogram(liquid_df, x="Conversão Resgate", nbins=30, title="D+ Conversão Resgate")
+        fig = px.histogram(liquid_df, x="Conversão Resgate", nbins=30, title="D+ Conversão Resgate",
+                           color_discrete_sequence=[TAG["laranja"]])
+        fig.update_layout(**PLOTLY_LAYOUT, height=350)
         st.plotly_chart(fig, use_container_width=True)
     with col2:
-        fig2 = px.histogram(liquid_df, x="Liquid. Resgate", nbins=30, title="D+ Liquidação Resgate")
+        fig2 = px.histogram(liquid_df, x="Liquid. Resgate", nbins=30, title="D+ Liquidação Resgate",
+                            color_discrete_sequence=[TAG["chart"][1]])
+        fig2.update_layout(**PLOTLY_LAYOUT, height=350)
         st.plotly_chart(fig2, use_container_width=True)
