@@ -1313,15 +1313,15 @@ elif page == "🎯 Carteira Modelo":
                                     # On target (green)
                                     styles.append("background-color: #1a4a2a; color: #a3d9a5")
                                 elif diff > 0:
-                                    # Overweight / above model (red)
-                                    intensity = min(abs(diff) / 5.0, 1.0)
-                                    r = int(90 + 50 * intensity)
-                                    styles.append(f"background-color: rgb({r}, 26, 26); color: #f5a5a5")
-                                else:
-                                    # Underweight / below model (blue)
+                                    # Overweight / above model (blue)
                                     intensity = min(abs(diff) / 5.0, 1.0)
                                     b = int(90 + 50 * intensity)
                                     styles.append(f"background-color: rgb(26, 58, {b}); color: #a5c8f5")
+                                else:
+                                    # Underweight / below model (red)
+                                    intensity = min(abs(diff) / 5.0, 1.0)
+                                    r = int(90 + 50 * intensity)
+                                    styles.append(f"background-color: rgb({r}, 26, 26); color: #f5a5a5")
                             elif col == "🎯 Modelo":
                                 styles.append("background-color: #3a3a1a; color: #f5e6a5; font-weight: bold")
                             else:
@@ -1337,8 +1337,8 @@ elif page == "🎯 Carteira Modelo":
                     st.markdown(
                         "<div style='display:flex; gap:20px; font-size:0.85em; margin-top:4px;'>"
                         "<span>🟢 <b>Aderente</b> (±0.5 p.p.)</span>"
-                        "<span>🔴 <b>Acima</b> do modelo (overweight)</span>"
-                        "<span>🔵 <b>Abaixo</b> do modelo (underweight)</span>"
+                        "<span>🔵 <b>Acima</b> do modelo (overweight)</span>"
+                        "<span>🔴 <b>Abaixo</b> do modelo (underweight)</span>"
                         "<span>🎯 <b>Modelo</b> = % alvo</span>"
                         "</div>",
                         unsafe_allow_html=True,
