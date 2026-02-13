@@ -383,7 +383,251 @@ def build_evolution_table(ativos_df, all_movements, caixa_initial):
     return df_fin, df_pct, df_mov
 
 
-def export_to_excel(df_fin, df_pct, df_mov, carteira_info):
+def parse_model_portfolio(uploaded_file):
+    """
+    Parse a model portfolio file. Tries to auto-detect columns for:
+    - Asset code/name
+    - Target % allocation
+    Returns a DataFrame with columns: Código, Ativo, % Alvo
+    """
+    df = pd.read_excel(uploaded_file)
+    df.columns = [str(c).strip() for c in df.columns]
+
+    # Try to find the code column (first column with mixed alphanumeric)
+    code_col = None
+    name_col = None
+    pct_col = None
+
+    for c in df.columns:
+        col_upper = c.upper()
+        # Percentage column
+        if pct_col is None and any(k in col_upper for k in ["%", "PESO", "ALVO", "TARGET", "ALOC"]):
+            pct_col = c
+        # Code column
+        elif code_col is None and any(k in col_upper for k in ["CÓD", "COD", "CODIGO", "CODE", "ID"]):
+            code_col = c
+        # Name column
+        elif name_col is None and any(k in col_upper for k in ["ATIVO", "NOME", "FUNDO", "NAME", "ASSET"]):
+            name_col = c
+
+    # Fallback: if not found by name, guess by position and content
+    if code_col is None and name_col is None and pct_col is None:
+        # Assume: first col = code/name, last numeric col = %
+        for c in df.columns:
+            if df[c].dtype in ['float64', 'int64'] and pct_col is None:
+                pct_col = c
+            elif code_col is None:
+                code_col = c
+
+    if pct_col is None:
+        # Try to find any column with values between 0 and 100
+        for c in df.columns:
+            if df[c].dtype in ['float64', 'int64']:
+                vals = df[c].dropna()
+                if len(vals) > 0 and vals.max() <= 100 and vals.min() >= 0:
+                    pct_col = c
+                    break
+
+    result = pd.DataFrame()
+    result["Código"] = df[code_col].astype(str) if code_col else ""
+    result["Ativo"] = df[name_col].astype(str) if name_col else result["Código"]
+    result["% Alvo"] = pd.to_numeric(df[pct_col], errors="coerce").fillna(0) if pct_col else 0
+
+    # Remove rows with 0% and empty
+    result = result[result["% Alvo"] > 0].reset_index(drop=True)
+
+    return result
+
+
+def build_adherence_analysis(ativos_df, model_df, all_movements, caixa_initial, pl_total):
+    """
+    Compare current portfolio (after pending movements) with model portfolio.
+    Returns a DataFrame showing: current %, target %, gap, and suggested action.
+    """
+    cod_col = find_col(ativos_df, "CÓD. ATIVO", "COD. ATIVO")
+
+    # Step 1: Build post-liquidation position (after all provisions)
+    # Start with current positions
+    positions = {}
+    for _, row in ativos_df.iterrows():
+        code = str(row[cod_col]) if cod_col else ""
+        name = str(row.get("ATIVO", ""))
+        fin = float(row.get("FINANCEIRO", 0))
+        positions[code] = {"name": name, "financeiro": fin, "code": code}
+
+    # Apply all pending movements
+    caixa = caixa_initial
+    for mov in all_movements:
+        fund_code = str(mov.get("fund_code", ""))
+        value = mov["value"]
+        op = mov["operation"]
+
+        if "Resgate" in op:
+            if fund_code in positions:
+                positions[fund_code]["financeiro"] -= value
+            caixa += value
+        elif "Aplicação" in op:
+            if fund_code in positions:
+                positions[fund_code]["financeiro"] += value
+            caixa -= value
+        elif op == "Débito/Passivo":
+            caixa -= value
+
+    # Total PL after movements
+    total_after = sum(p["financeiro"] for p in positions.values()) + caixa
+
+    # Step 2: Match model to actual positions
+    rows = []
+    model_codes = set()
+
+    for _, model_row in model_df.iterrows():
+        m_code = str(model_row["Código"]).strip()
+        m_name = str(model_row["Ativo"]).strip()
+        m_pct_alvo = float(model_row["% Alvo"])
+        model_codes.add(m_code)
+
+        # Find matching position
+        matched_pos = None
+        if m_code in positions:
+            matched_pos = positions[m_code]
+        else:
+            # Try matching by name
+            for code, pos in positions.items():
+                if (m_name.upper()[:15] in pos["name"].upper() or
+                        pos["name"].upper()[:15] in m_name.upper()):
+                    matched_pos = pos
+                    break
+
+        fin_atual = matched_pos["financeiro"] if matched_pos else 0
+        pct_atual = (fin_atual / total_after * 100) if total_after > 0 else 0
+
+        gap_pct = m_pct_alvo - pct_atual
+        gap_rs = gap_pct / 100 * total_after
+
+        if abs(gap_pct) < 0.1:
+            acao = "✅ OK"
+        elif gap_pct > 0:
+            acao = f"📥 Aplicar R$ {abs(gap_rs):,.0f}"
+        else:
+            acao = f"📤 Resgatar R$ {abs(gap_rs):,.0f}"
+
+        rows.append({
+            "Ativo": m_name[:45],
+            "Código": m_code,
+            "Financeiro Projetado": fin_atual,
+            "% Atual (Pós-Mov.)": round(pct_atual, 2),
+            "% Alvo (Modelo)": round(m_pct_alvo, 2),
+            "Gap (p.p.)": round(gap_pct, 2),
+            "Gap (R$)": round(gap_rs, 2),
+            "Ação Sugerida": acao,
+        })
+
+    # Add positions NOT in model (excess)
+    for code, pos in positions.items():
+        if code not in model_codes and pos["financeiro"] > 100:
+            pct_atual = (pos["financeiro"] / total_after * 100) if total_after > 0 else 0
+            if pct_atual > 0.05:
+                rows.append({
+                    "Ativo": pos["name"][:45],
+                    "Código": code,
+                    "Financeiro Projetado": pos["financeiro"],
+                    "% Atual (Pós-Mov.)": round(pct_atual, 2),
+                    "% Alvo (Modelo)": 0.0,
+                    "Gap (p.p.)": round(-pct_atual, 2),
+                    "Gap (R$)": round(-pos["financeiro"], 2),
+                    "Ação Sugerida": f"📤 Resgatar R$ {pos['financeiro']:,.0f} (fora do modelo)",
+                })
+
+    # Caixa row
+    caixa_pct = (caixa / total_after * 100) if total_after > 0 else 0
+    # Find caixa target in model (if any)
+    caixa_target = 100 - model_df["% Alvo"].sum()
+    caixa_gap = caixa_target - caixa_pct
+
+    rows.append({
+        "Ativo": "💰 CAIXA",
+        "Código": "CAIXA",
+        "Financeiro Projetado": caixa,
+        "% Atual (Pós-Mov.)": round(caixa_pct, 2),
+        "% Alvo (Modelo)": round(max(0, caixa_target), 2),
+        "Gap (p.p.)": round(caixa_gap, 2),
+        "Gap (R$)": round(caixa_gap / 100 * total_after, 2),
+        "Ação Sugerida": "Residual" if abs(caixa_gap) < 1 else ("Excess" if caixa_gap < -1 else "Deficit"),
+    })
+
+    df = pd.DataFrame(rows)
+
+    # Summary info
+    info = {
+        "pl_projetado": total_after,
+        "caixa_projetado": caixa,
+        "total_aplicar": sum(r["Gap (R$)"] for r in rows if r["Gap (R$)"] > 0 and r["Código"] != "CAIXA"),
+        "total_resgatar": sum(abs(r["Gap (R$)"]) for r in rows if r["Gap (R$)"] < 0 and r["Código"] != "CAIXA"),
+    }
+
+    return df, info
+
+
+def generate_rebalancing_plan(adherence_df, liquid_df):
+    """
+    Generate a step-by-step rebalancing plan with liquidation dates.
+    """
+    plan = []
+    for _, row in adherence_df.iterrows():
+        if row["Código"] == "CAIXA":
+            continue
+        gap = row["Gap (R$)"]
+        if abs(gap) < 100:  # Ignore tiny gaps
+            continue
+
+        code = row["Código"]
+        name = row["Ativo"]
+
+        # Get liquidation info
+        liq_info = match_fund_liquidation(name, code, liquid_df)
+
+        if gap < 0:
+            # Need to redeem
+            op = "Resgate"
+            if liq_info is not None:
+                d_conv = int(liq_info["Conversão Resgate"])
+                d_liq = int(liq_info["Liquid. Resgate"])
+                contagem = str(liq_info.get("Contagem Resgate", "Úteis"))
+                d_plus = f"D+{d_conv}+{d_liq} ({contagem})"
+            else:
+                d_plus = "N/A"
+        else:
+            # Need to invest
+            op = "Aplicação"
+            if liq_info is not None:
+                d_conv = int(liq_info["Conversão Aplic."])
+                d_plus = f"D+{d_conv}"
+            else:
+                d_plus = "N/A"
+
+        plan.append({
+            "Prioridade": len(plan) + 1,
+            "Ativo": name,
+            "Código": code,
+            "Operação": op,
+            "Valor (R$)": abs(gap),
+            "D+": d_plus,
+            "De % Atual": row["% Atual (Pós-Mov.)"],
+            "Para % Alvo": row["% Alvo (Modelo)"],
+        })
+
+    # Sort: resgates first (to free cash), then aplicações
+    plan_df = pd.DataFrame(plan)
+    if not plan_df.empty:
+        plan_df["_sort"] = plan_df["Operação"].map({"Resgate": 0, "Aplicação": 1})
+        plan_df = plan_df.sort_values(["_sort", "Valor (R$)"], ascending=[True, False])
+        plan_df["Prioridade"] = range(1, len(plan_df) + 1)
+        plan_df = plan_df.drop(columns=["_sort"])
+
+    return plan_df
+
+
+def export_to_excel(df_fin, df_pct, df_mov, carteira_info, adherence_df=None, plan_df=None):
     """Export simulation results to Excel."""
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
@@ -395,6 +639,10 @@ def export_to_excel(df_fin, df_pct, df_mov, carteira_info):
             df_pct.to_excel(writer, sheet_name="Evolução % PL", index=False)
         if df_mov is not None and not df_mov.empty:
             df_mov.to_excel(writer, sheet_name="Movimentos", index=False)
+        if adherence_df is not None and not adherence_df.empty:
+            adherence_df.to_excel(writer, sheet_name="Aderência ao Modelo", index=False)
+        if plan_df is not None and not plan_df.empty:
+            plan_df.to_excel(writer, sheet_name="Plano de Realocação", index=False)
     return output.getvalue()
 
 
@@ -410,6 +658,8 @@ if "new_movements" not in st.session_state:
     st.session_state.new_movements = []
 if "portfolio_loaded" not in st.session_state:
     st.session_state.portfolio_loaded = False
+if "model_loaded" not in st.session_state:
+    st.session_state.model_loaded = False
 
 # ─────────────────────────────────────────────────────────
 # SIDEBAR
@@ -425,6 +675,7 @@ with st.sidebar:
             "📂 Importar Carteira",
             "📋 Posição Atual",
             "📊 Projeção da Carteira",
+            "🎯 Carteira Modelo",
             "🔄 Nova Realocação",
             "📅 Dados de Liquidação",
         ],
@@ -750,6 +1001,220 @@ elif page == "📊 Projeção da Carteira":
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     type="primary",
                 )
+
+
+# ═════════════════════════════════════════════════════════
+# PAGE: CARTEIRA MODELO
+# ═════════════════════════════════════════════════════════
+elif page == "🎯 Carteira Modelo":
+    st.header("🎯 Aderência à Carteira Modelo")
+
+    if not st.session_state.portfolio_loaded:
+        st.warning("Nenhuma carteira carregada. Vá em **📂 Importar Carteira** primeiro.")
+    else:
+        st.markdown(
+            "Faça upload da **Carteira Modelo** para comparar com a posição atual "
+            "(considerando provisões e movimentos pendentes). "
+            "O sistema mostra o gap e sugere exatamente o que fazer para aderir ao modelo."
+        )
+
+        model_file = st.file_uploader(
+            "Selecione o arquivo da Carteira Modelo",
+            type=["xlsx", "xls"],
+            help="Planilha com colunas: Código/Ativo e % Alvo",
+            key="model_upload",
+        )
+
+        if model_file:
+            with st.spinner("Processando carteira modelo..."):
+                model_df = parse_model_portfolio(model_file)
+                st.session_state.model_df = model_df
+                st.session_state.model_loaded = True
+
+            st.success(f"✅ Carteira modelo carregada: {len(model_df)} ativos, total {model_df['% Alvo'].sum():.1f}%")
+
+        if st.session_state.model_loaded:
+            model_df = st.session_state.model_df
+            sheets = st.session_state.portfolio_sheets
+            ativos = sheets["ativos"]
+            carteira = sheets.get("carteira")
+
+            # Get caixa and PL
+            caixa_initial = 0.0
+            pl_total = 0.0
+            if carteira is not None and not carteira.empty:
+                caixa_initial = float(carteira.iloc[0].get("CAIXA", 0))
+                pl_total = float(carteira.iloc[0].get("PL PROJETADO", carteira.iloc[0].get("PL FECHAMENTO", 0)))
+
+            # Combine all movements (provisions + manual)
+            provision_movs = st.session_state.get("provision_movements", [])
+            new_movs = st.session_state.get("new_movements", [])
+            all_movements = provision_movs + new_movs
+
+            # Show the model
+            st.subheader("Carteira Modelo")
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                st.dataframe(
+                    model_df.style.format({"% Alvo": "{:.2f}%"}),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            with col2:
+                fig_model = px.pie(model_df, values="% Alvo", names="Ativo", hole=0.4)
+                fig_model.update_traces(textposition="inside", textinfo="percent+label")
+                fig_model.update_layout(height=350, showlegend=False, margin=dict(t=10, b=10))
+                st.plotly_chart(fig_model, use_container_width=True)
+
+            st.divider()
+
+            # ── Adherence Analysis ──
+            st.subheader("📊 Análise de Aderência (Pós-Movimentos Pendentes)")
+
+            if all_movements:
+                st.info(f"Considerando **{len(all_movements)} movimentos pendentes** (provisões + manuais) antes de comparar com o modelo.")
+
+            adherence_df, info = build_adherence_analysis(
+                ativos, model_df, all_movements, caixa_initial, pl_total
+            )
+
+            # Summary metrics
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("PL Projetado", f"R$ {info['pl_projetado']:,.0f}")
+            with col2:
+                st.metric("Caixa Projetado", f"R$ {info['caixa_projetado']:,.0f}")
+            with col3:
+                st.metric("Total a Aplicar", f"R$ {info['total_aplicar']:,.0f}", delta_color="normal")
+            with col4:
+                st.metric("Total a Resgatar", f"R$ {info['total_resgatar']:,.0f}", delta_color="inverse")
+
+            # Adherence table
+            def color_gap(row):
+                gap = row["Gap (p.p.)"]
+                if row["Ativo"] == "💰 CAIXA":
+                    return ["background-color: #2d4a1a"] * len(row)
+                if abs(gap) < 0.5:
+                    return ["background-color: #1a3a1a"] * len(row)
+                elif gap > 0:
+                    return ["background-color: #1a3a5c"] * len(row)
+                else:
+                    return ["background-color: #5c1a1a"] * len(row)
+
+            st.dataframe(
+                adherence_df.style
+                .format({
+                    "Financeiro Projetado": "R$ {:,.2f}",
+                    "% Atual (Pós-Mov.)": "{:.2f}%",
+                    "% Alvo (Modelo)": "{:.2f}%",
+                    "Gap (p.p.)": "{:+.2f}",
+                    "Gap (R$)": "R$ {:,.0f}",
+                })
+                .apply(color_gap, axis=1),
+                use_container_width=True,
+                hide_index=True,
+                height=500,
+            )
+
+            # Gap chart
+            st.subheader("Gap: Atual vs Modelo")
+            chart_data = adherence_df[adherence_df["Código"] != "CAIXA"].copy()
+            fig_gap = go.Figure()
+            fig_gap.add_trace(go.Bar(
+                name="% Atual (Pós-Mov.)",
+                x=chart_data["Ativo"],
+                y=chart_data["% Atual (Pós-Mov.)"],
+                marker_color="#3498db",
+            ))
+            fig_gap.add_trace(go.Bar(
+                name="% Alvo (Modelo)",
+                x=chart_data["Ativo"],
+                y=chart_data["% Alvo (Modelo)"],
+                marker_color="#e67e22",
+            ))
+            fig_gap.update_layout(barmode="group", height=450, xaxis_tickangle=-30, yaxis_title="% PL")
+            st.plotly_chart(fig_gap, use_container_width=True)
+
+            st.divider()
+
+            # ── Rebalancing Plan ──
+            st.subheader("📋 Plano de Realocação Sugerido")
+            st.markdown("*Resgates primeiro (liberar caixa) → depois Aplicações*")
+
+            plan_df = generate_rebalancing_plan(adherence_df, liquid_df)
+
+            if not plan_df.empty:
+                # Separate resgates and aplicações
+                resgates = plan_df[plan_df["Operação"] == "Resgate"]
+                aplicacoes = plan_df[plan_df["Operação"] == "Aplicação"]
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown("**📤 Resgates a realizar:**")
+                    if not resgates.empty:
+                        st.dataframe(
+                            resgates.style.format({
+                                "Valor (R$)": "R$ {:,.0f}",
+                                "De % Atual": "{:.2f}%",
+                                "Para % Alvo": "{:.2f}%",
+                            }),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                        st.metric("Total Resgates", f"R$ {resgates['Valor (R$)'].sum():,.0f}")
+                    else:
+                        st.info("Nenhum resgate necessário.")
+
+                with col2:
+                    st.markdown("**📥 Aplicações a realizar:**")
+                    if not aplicacoes.empty:
+                        st.dataframe(
+                            aplicacoes.style.format({
+                                "Valor (R$)": "R$ {:,.0f}",
+                                "De % Atual": "{:.2f}%",
+                                "Para % Alvo": "{:.2f}%",
+                            }),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                        st.metric("Total Aplicações", f"R$ {aplicacoes['Valor (R$)'].sum():,.0f}")
+                    else:
+                        st.info("Nenhuma aplicação necessária.")
+
+                # Full plan table
+                st.subheader("Plano Completo (ordenado por prioridade)")
+                st.dataframe(
+                    plan_df.style.format({
+                        "Valor (R$)": "R$ {:,.0f}",
+                        "De % Atual": "{:.2f}%",
+                        "Para % Alvo": "{:.2f}%",
+                    }).apply(
+                        lambda row: [
+                            "background-color: #4a1a1a" if row["Operação"] == "Resgate" else "background-color: #1a4a2a"
+                        ] * len(row),
+                        axis=1,
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                # Export
+                st.divider()
+                excel_data = export_to_excel(
+                    None, None, None,
+                    carteira,
+                    adherence_df=adherence_df,
+                    plan_df=plan_df,
+                )
+                st.download_button(
+                    label="📥 Exportar Plano para Excel",
+                    data=excel_data,
+                    file_name=f"plano_realocacao_modelo_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                )
+            else:
+                st.success("🎯 Carteira já está aderente ao modelo! Nenhuma movimentação necessária.")
 
 
 # ═════════════════════════════════════════════════════════
