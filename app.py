@@ -286,6 +286,18 @@ def subtract_business_days(end_date, num_days, count_type="Úteis"):
         return end_date - timedelta(days=num_days)
 
 
+def compute_settle_date(request_date, conv_days, liq_days, count_type):
+    """Compute liquidation date from a request date: request → cotização → liquidação."""
+    cot = add_business_days(request_date, conv_days, count_type)
+    return add_business_days(cot, liq_days, count_type)
+
+
+def compute_latest_request_date(target_date, conv_days, liq_days, count_type):
+    """Latest possible request date so that money settles by target_date."""
+    pre_liq = subtract_business_days(target_date, liq_days, count_type)
+    return subtract_business_days(pre_liq, conv_days, count_type)
+
+
 def is_stock_ticker(name):
     """Check if the asset name looks like a B3 stock/ETF ticker."""
     if not name:
@@ -1090,75 +1102,426 @@ def build_adherence_analysis(ativos_df, model_df, all_movements, caixa_initial, 
 
 
 def generate_rebalancing_plan(adherence_df, liquid_df, request_date=None):
-    """Generate rebalancing plan: resgates first, then aplicações."""
-    if request_date is None:
-        request_date = pd.Timestamp(datetime.today().date())
+    """Legacy wrapper — calls smart version with minimal args for backward compat."""
+    plan_df, plan_movements, _warnings = generate_smart_rebalancing_plan(
+        adherence_df, liquid_df, [], 0, None, set(), today=request_date
+    )
+    return plan_df, plan_movements
 
-    plan = []
+
+def generate_smart_rebalancing_plan(
+    adherence_df, liquid_df, all_movements, caixa_initial,
+    ativos_df, cash_fund_codes, today=None
+):
+    """
+    Generate a smart rebalancing plan that matches redemption settlement dates
+    with passive (investor withdrawal) dates, while also rebalancing toward the model.
+
+    Returns: (plan_df, plan_movements, warnings)
+      - plan_df: DataFrame with columns including 'Data Solicitação', 'Data Liquidação', 'Motivo'
+      - plan_movements: list of movement dicts compatible with build_cash_flow_timeline
+      - warnings: list of {level: 'error'|'warning', message: str}
+    """
+    if today is None:
+        today = pd.Timestamp(datetime.today().date())
+    else:
+        today = pd.Timestamp(today)
+
+    warnings = []
+    plan_rows = []
     plan_movements = []
 
+    # ── FASE 0: Catálogo de Fundos ──
+    catalog = {}  # code → fund info dict
     for _, row in adherence_df.iterrows():
-        if row["Código"] == "CAIXA":
-            continue
-        gap = row["Gap (R$)"]
-        if abs(gap) < 100:
+        code = str(row["Código"])
+        if code == "CAIXA":
             continue
 
-        code = row["Código"]
         name = row["Ativo"]
+        gap_rs = row["Gap (R$)"]
+        financeiro = row.get("Financeiro Projetado", 0)
+
         liq_info = match_fund_liquidation(name, code, liquid_df)
 
-        if gap < 0:
-            op = "Resgate"
-            if liq_info is not None:
-                d_conv = int(liq_info["Conversão Resgate"])
-                d_liq = int(liq_info["Liquid. Resgate"])
-                contagem = str(liq_info.get("Contagem Resgate", "Úteis"))
-                if contagem not in ["Úteis", "Corridos"]:
-                    contagem = "Úteis"
-                d_plus = f"D+{d_conv}+{d_liq} ({contagem})"
-                cot_date = add_business_days(request_date, d_conv, contagem)
-                liq_date = add_business_days(cot_date, d_liq, contagem)
-            else:
-                d_plus = "N/A"
-                liq_date = request_date
+        if liq_info is not None:
+            d_conv = int(liq_info["Conversão Resgate"])
+            d_liq = int(liq_info["Liquid. Resgate"])
+            contagem = str(liq_info.get("Contagem Resgate", "Úteis"))
+            if contagem not in ["Úteis", "Corridos"]:
+                contagem = "Úteis"
+            d_conv_aplic = int(liq_info["Conversão Aplic."])
         else:
-            op = "Aplicação"
-            if liq_info is not None:
-                d_conv = int(liq_info["Conversão Aplic."])
-                d_plus = f"D+{d_conv}"
-                liq_date = add_business_days(request_date, d_conv, "Úteis")
-            else:
-                d_plus = "N/A"
-                liq_date = request_date
+            d_conv, d_liq, contagem = 0, 0, "Úteis"
+            d_conv_aplic = 0
 
-        plan.append({
-            "Prioridade": len(plan) + 1,
-            "Ativo": name, "Código": code,
-            "Operação": op,
-            "Valor (R$)": abs(gap),
-            "D+": d_plus,
-            "Data Liquidação": liq_date.strftime("%d/%m/%Y"),
-            "De % Atual": row["% Atual (Pós-Mov.)"],
-            "Para % Alvo": row["% Alvo (Modelo)"],
+        is_overweight = gap_rs < -100   # needs resgate to match model
+        is_underweight = gap_rs > 100   # needs aplicação
+        is_cash = code in cash_fund_codes
+        max_resgate = abs(gap_rs) if is_overweight else 0  # max we WANT to redeem for model
+        available_fin = max(0, financeiro)  # total available in fund
+
+        catalog[code] = {
+            "code": code, "name": name, "gap_rs": gap_rs,
+            "financeiro": financeiro, "available_fin": available_fin,
+            "d_conv": d_conv, "d_liq": d_liq, "contagem": contagem,
+            "d_conv_aplic": d_conv_aplic,
+            "d_total": d_conv + d_liq,
+            "is_overweight": is_overweight, "is_underweight": is_underweight,
+            "is_cash": is_cash, "max_model_resgate": max_resgate,
+            "pct_atual": row["% Atual (Pós-Mov.)"],
+            "pct_alvo": row["% Alvo (Modelo)"],
+            "already_redeemed": 0.0,  # track cumulative resgates in this plan
+        }
+
+    # ── FASE 1: Extrair Passivos Pendentes ──
+    passivos = {}  # {date: total_value}
+    if all_movements:
+        for m in all_movements:
+            if m["operation"] != "Resgate Passivo":
+                continue
+            liq_date = pd.Timestamp(m["liquidation_date"]) if pd.notna(m.get("liquidation_date")) else None
+            if liq_date is None or liq_date < today:
+                continue
+            passivos.setdefault(liq_date, 0.0)
+            passivos[liq_date] += m["value"]
+
+    passivos_sorted = sorted(passivos.items(), key=lambda x: x[0])
+
+    # ── FASE 2: Cobrir Cada Passivo com Resgates ──
+    # Build effective cash available today (caixa + cash fund positions)
+    effective_cash = caixa_initial
+    if ativos_df is not None and not ativos_df.empty:
+        cod_col = find_col(ativos_df, "CÓD. ATIVO", "COD. ATIVO")
+        if cod_col:
+            for _, row in ativos_df.iterrows():
+                code = str(row[cod_col])
+                if code in cash_fund_codes:
+                    effective_cash += float(row.get("FINANCEIRO", 0))
+
+    # Pre-compute inflows from existing provisions (non-passive resgates already in progress)
+    # These will add cash on their liquidation dates
+    provision_inflows = {}  # {date: amount}
+    if all_movements:
+        for m in all_movements:
+            op = m["operation"]
+            if op in ("Resgate (Cotizando)", "Resgate (Provisão)", "Resgate"):
+                fund_code = str(m.get("fund_code", ""))
+                if fund_code not in cash_fund_codes:  # non-cash fund resgates add to cash
+                    liq_date = pd.Timestamp(m["liquidation_date"]) if pd.notna(m.get("liquidation_date")) else None
+                    if liq_date and liq_date >= today:
+                        provision_inflows.setdefault(liq_date, 0.0)
+                        provision_inflows[liq_date] += m["value"]
+
+    # Track plan-generated inflows: {date: amount}
+    plan_inflows = {}
+
+    for passivo_date, passivo_value in passivos_sorted:
+        # Compute cash available at passivo_date considering:
+        # 1) effective_cash today
+        # 2) provision inflows settling <= passivo_date
+        # 3) plan inflows from earlier phases settling <= passivo_date
+        # 4) earlier passivos that drain cash
+        cash_at_date = effective_cash
+
+        # Add provision inflows settling by this date
+        for d, v in provision_inflows.items():
+            if d <= passivo_date:
+                cash_at_date += v
+
+        # Add plan inflows from earlier passivo coverage settling by this date
+        for d, v in plan_inflows.items():
+            if d <= passivo_date:
+                cash_at_date += v
+
+        # Subtract earlier passivos
+        for pd_date, pd_val in passivos_sorted:
+            if pd_date < passivo_date:
+                cash_at_date -= pd_val
+            else:
+                break
+
+        deficit = passivo_value - cash_at_date
+        if deficit <= 0:
+            continue  # Cash already covers this passivo
+
+        # Need to find funds to redeem that settle by passivo_date
+        candidates = []
+        for code, fund in catalog.items():
+            if fund["is_cash"]:
+                continue  # Cash funds don't help (already counted)
+            remaining = fund["available_fin"] - fund["already_redeemed"]
+            if remaining < 100:
+                continue
+
+            # When must we request to settle by passivo_date?
+            req_date = compute_latest_request_date(
+                passivo_date, fund["d_conv"], fund["d_liq"], fund["contagem"]
+            )
+            if req_date < today:
+                continue  # D+ too long — impossible to settle in time
+
+            settle = compute_settle_date(req_date, fund["d_conv"], fund["d_liq"], fund["contagem"])
+
+            candidates.append({
+                "code": code,
+                "fund": fund,
+                "request_date": req_date,
+                "settle_date": settle,
+                "remaining": remaining,
+                "is_overweight": fund["is_overweight"],
+                "model_resgate": fund["max_model_resgate"] - fund["already_redeemed"],
+            })
+
+        # Sort: overweight funds first (kills two birds), then by D+ ascending (faster settlement)
+        candidates.sort(key=lambda c: (0 if c["is_overweight"] else 1, c["fund"]["d_total"]))
+
+        # Greedy allocation
+        still_needed = deficit
+        for cand in candidates:
+            if still_needed <= 0:
+                break
+
+            # How much to redeem from this fund
+            if cand["is_overweight"] and cand["model_resgate"] > 0:
+                # Prefer up to model gap first
+                amount = min(still_needed, cand["model_resgate"], cand["remaining"])
+            else:
+                amount = min(still_needed, cand["remaining"])
+
+            if amount < 100:
+                continue
+
+            fund = cand["fund"]
+            req_date = cand["request_date"]
+            settle_date = cand["settle_date"]
+            d_plus_str = f"D+{fund['d_conv']}+{fund['d_liq']} ({fund['contagem']})"
+
+            plan_rows.append({
+                "Prioridade": 0,
+                "Ativo": fund["name"], "Código": fund["code"],
+                "Operação": "Resgate",
+                "Valor (R$)": round(amount, 2),
+                "D+": d_plus_str,
+                "Data Solicitação": req_date.strftime("%d/%m/%Y"),
+                "Data Liquidação": settle_date.strftime("%d/%m/%Y"),
+                "Motivo": f"Cobertura passivo {passivo_date.strftime('%d/%m')}",
+                "De % Atual": fund["pct_atual"],
+                "Para % Alvo": fund["pct_alvo"],
+            })
+            plan_movements.append({
+                "fund_name": fund["name"], "fund_code": fund["code"],
+                "operation": "Resgate", "value": round(amount, 2),
+                "request_date": req_date,
+                "liquidation_date": settle_date,
+                "description": f"Plano: Resgate {fund['name'][:30]} (cob. passivo {passivo_date.strftime('%d/%m')})",
+                "source": "plano_cobertura_passivo",
+            })
+
+            fund["already_redeemed"] += amount
+            plan_inflows.setdefault(settle_date, 0.0)
+            plan_inflows[settle_date] += amount
+            still_needed -= amount
+
+        if still_needed > 100:
+            # Try any fund even below model (emergency)
+            for cand in candidates:
+                if still_needed <= 0:
+                    break
+                remaining_after = cand["remaining"] - (cand["fund"]["already_redeemed"] - catalog[cand["code"]]["already_redeemed"] + cand["fund"]["already_redeemed"])
+                # re-check actual remaining
+                actual_remaining = cand["fund"]["available_fin"] - cand["fund"]["already_redeemed"]
+                extra = min(still_needed, actual_remaining)
+                if extra < 100:
+                    continue
+
+                fund = cand["fund"]
+                req_date = cand["request_date"]
+                settle_date = cand["settle_date"]
+                d_plus_str = f"D+{fund['d_conv']}+{fund['d_liq']} ({fund['contagem']})"
+
+                plan_rows.append({
+                    "Prioridade": 0,
+                    "Ativo": fund["name"], "Código": fund["code"],
+                    "Operação": "Resgate",
+                    "Valor (R$)": round(extra, 2),
+                    "D+": d_plus_str,
+                    "Data Solicitação": req_date.strftime("%d/%m/%Y"),
+                    "Data Liquidação": settle_date.strftime("%d/%m/%Y"),
+                    "Motivo": f"Cobertura passivo {passivo_date.strftime('%d/%m')} (emergencial)",
+                    "De % Atual": fund["pct_atual"],
+                    "Para % Alvo": fund["pct_alvo"],
+                })
+                plan_movements.append({
+                    "fund_name": fund["name"], "fund_code": fund["code"],
+                    "operation": "Resgate", "value": round(extra, 2),
+                    "request_date": req_date,
+                    "liquidation_date": settle_date,
+                    "description": f"Plano: Resgate {fund['name'][:30]} (emerg. passivo {passivo_date.strftime('%d/%m')})",
+                    "source": "plano_cobertura_passivo",
+                })
+
+                fund["already_redeemed"] += extra
+                plan_inflows.setdefault(settle_date, 0.0)
+                plan_inflows[settle_date] += extra
+                still_needed -= extra
+
+        if still_needed > 100:
+            warnings.append({
+                "level": "error",
+                "message": (
+                    f"Impossivel cobrir passivo de R$ {passivo_value:,.0f} em "
+                    f"{passivo_date.strftime('%d/%m/%Y')}: deficit de R$ {still_needed:,.0f}. "
+                    f"Nenhum fundo consegue liquidar a tempo."
+                ),
+            })
+
+    # ── FASE 3: Rebalancear Excedentes (overweight restante) ──
+    for code, fund in catalog.items():
+        if fund["is_cash"]:
+            continue
+        if not fund["is_overweight"]:
+            continue
+        remaining_model_gap = fund["max_model_resgate"] - fund["already_redeemed"]
+        if remaining_model_gap < 100:
+            continue
+
+        req_date = today
+        settle_date = compute_settle_date(req_date, fund["d_conv"], fund["d_liq"], fund["contagem"])
+        d_plus_str = f"D+{fund['d_conv']}+{fund['d_liq']} ({fund['contagem']})"
+
+        plan_rows.append({
+            "Prioridade": 0,
+            "Ativo": fund["name"], "Código": fund["code"],
+            "Operação": "Resgate",
+            "Valor (R$)": round(remaining_model_gap, 2),
+            "D+": d_plus_str,
+            "Data Solicitação": req_date.strftime("%d/%m/%Y"),
+            "Data Liquidação": settle_date.strftime("%d/%m/%Y"),
+            "Motivo": "Rebalanceamento (acima do modelo)",
+            "De % Atual": fund["pct_atual"],
+            "Para % Alvo": fund["pct_alvo"],
         })
         plan_movements.append({
-            "fund_name": name, "fund_code": code,
-            "operation": op, "value": abs(gap),
-            "request_date": request_date,
-            "liquidation_date": liq_date,
-            "description": f"Plano: {op} {name[:30]}",
-            "source": "plano_modelo",
+            "fund_name": fund["name"], "fund_code": fund["code"],
+            "operation": "Resgate", "value": round(remaining_model_gap, 2),
+            "request_date": req_date,
+            "liquidation_date": settle_date,
+            "description": f"Plano: Resgate {fund['name'][:30]} (rebalanceamento)",
+            "source": "plano_rebalanceamento",
         })
 
-    plan_df = pd.DataFrame(plan)
+        fund["already_redeemed"] += remaining_model_gap
+        plan_inflows.setdefault(settle_date, 0.0)
+        plan_inflows[settle_date] += remaining_model_gap
+
+    # ── FASE 4: Aplicações nos Fundos Abaixo do Modelo ──
+    # Compute when cash will be available from ALL resgates (provisions + plan)
+    all_inflow_dates = sorted(set(
+        list(provision_inflows.keys()) + list(plan_inflows.keys())
+    ))
+
+    # Compute total cash available for applications:
+    # = effective_cash + all resgate inflows - all passivos
+    total_passivos = sum(passivos.values())
+    total_provision_inflows = sum(provision_inflows.values())
+    total_plan_inflows = sum(plan_inflows.values())
+    cash_for_applications = effective_cash + total_provision_inflows + total_plan_inflows - total_passivos
+
+    # Determine earliest application date = day after last resgate settles
+    if all_inflow_dates:
+        last_inflow_date = max(all_inflow_dates)
+        # Applications go one business day after last inflow
+        aplic_date = add_business_days(last_inflow_date, 1, "Úteis")
+    else:
+        aplic_date = add_business_days(today, 1, "Úteis")
+
+    # Sort underweight funds by gap (largest gap first)
+    underweight_funds = [
+        (code, fund) for code, fund in catalog.items()
+        if fund["is_underweight"] and not fund["is_cash"]
+    ]
+    underweight_funds.sort(key=lambda x: x[1]["gap_rs"], reverse=True)
+
+    available_for_aplic = max(0, cash_for_applications)
+
+    for code, fund in underweight_funds:
+        if available_for_aplic < 100:
+            break
+
+        gap = fund["gap_rs"]  # positive = needs application
+        amount = min(gap, available_for_aplic)
+        if amount < 100:
+            continue
+
+        settle_date = add_business_days(aplic_date, fund["d_conv_aplic"], "Úteis")
+        d_plus_str = f"D+{fund['d_conv_aplic']}"
+
+        plan_rows.append({
+            "Prioridade": 0,
+            "Ativo": fund["name"], "Código": fund["code"],
+            "Operação": "Aplicação",
+            "Valor (R$)": round(amount, 2),
+            "D+": d_plus_str,
+            "Data Solicitação": aplic_date.strftime("%d/%m/%Y"),
+            "Data Liquidação": settle_date.strftime("%d/%m/%Y"),
+            "Motivo": "Rebalanceamento (abaixo do modelo)",
+            "De % Atual": fund["pct_atual"],
+            "Para % Alvo": fund["pct_alvo"],
+        })
+        plan_movements.append({
+            "fund_name": fund["name"], "fund_code": fund["code"],
+            "operation": "Aplicação", "value": round(amount, 2),
+            "request_date": aplic_date,
+            "liquidation_date": settle_date,
+            "description": f"Plano: Aplicação {fund['name'][:30]} (rebalanceamento)",
+            "source": "plano_rebalanceamento",
+        })
+
+        available_for_aplic -= amount
+
+    if underweight_funds and available_for_aplic < 0:
+        warnings.append({
+            "level": "warning",
+            "message": (
+                f"Caixa insuficiente para todas as aplicações. "
+                f"Faltam R$ {abs(available_for_aplic):,.0f}."
+            ),
+        })
+
+    # ── FASE 5: Validação Final de Caixa ──
+    # Quick check: simulate day-by-day cash with provisions + plan
+    if plan_movements and ativos_df is not None and not ativos_df.empty:
+        combined = (all_movements or []) + plan_movements
+        df_check, _ = build_cash_flow_timeline(
+            caixa_initial, ativos_df, combined, cash_fund_codes
+        )
+        if not df_check.empty:
+            neg_days = df_check[df_check["Negativo"]]
+            if not neg_days.empty:
+                first_neg = neg_days.iloc[0]
+                warnings.append({
+                    "level": "warning",
+                    "message": (
+                        f"Caixa fica negativo em {first_neg['Data'].strftime('%d/%m/%Y')} "
+                        f"(R$ {first_neg['Saldo (R$)']:,.0f}). Verifique o plano."
+                    ),
+                })
+
+    # ── Build final DataFrame ──
+    plan_df = pd.DataFrame(plan_rows)
     if not plan_df.empty:
-        plan_df["_sort"] = plan_df["Operação"].map({"Resgate": 0, "Aplicação": 1})
-        plan_df = plan_df.sort_values(["_sort", "Valor (R$)"], ascending=[True, False])
+        # Sort: cobertura passivo first, then resgates, then aplicações
+        motivo_order = plan_df["Motivo"].apply(
+            lambda m: 0 if "passivo" in m.lower() else (1 if "acima" in m.lower() else 2)
+        )
+        plan_df["_sort"] = motivo_order * 10 + plan_df["Operação"].map({"Resgate": 0, "Aplicação": 5}).fillna(3)
+        plan_df = plan_df.sort_values(["_sort", "Data Liquidação", "Valor (R$)"],
+                                       ascending=[True, True, False])
         plan_df["Prioridade"] = range(1, len(plan_df) + 1)
         plan_df = plan_df.drop(columns=["_sort"])
 
-    return plan_df, plan_movements
+    return plan_df, plan_movements, warnings
 
 
 # ─────────────────────────────────────────────────────────
@@ -2014,43 +2377,126 @@ elif page == "🎯 Carteira Modelo":
         st.subheader("📋 Plano de Realocação Sugerido")
 
         plan_date = st.date_input(
-            "Data de execução do plano",
+            "Data mais cedo para submeter solicitações",
             value=datetime.today(),
-            help="Data em que pretende solicitar os movimentos (afeta D+ e datas de liquidação)",
+            help="Data mínima para solicitar movimentos. O algoritmo calculará a data ideal de cada solicitação para casar com passivos.",
         )
 
-        plan_df, plan_movements = generate_rebalancing_plan(
-            adherence_df, liquid_df, request_date=pd.Timestamp(plan_date)
+        plan_df, plan_movements, plan_warnings = generate_smart_rebalancing_plan(
+            adherence_df, liquid_df, all_movements, caixa_initial,
+            ativos, ctx.get("cash_fund_codes", set()), today=pd.Timestamp(plan_date)
         )
+
+        # ── Warnings ──
+        for w in plan_warnings:
+            if w["level"] == "error":
+                st.error(f"🚨 {w['message']}")
+            else:
+                st.warning(f"⚠️ {w['message']}")
 
         if not plan_df.empty:
-            st.markdown("*Prioridade: resgates primeiro (liberar caixa) → depois aplicações.*")
+            display_cols = ["Prioridade", "Ativo", "Operação", "Valor (R$)", "D+",
+                            "Data Solicitação", "Data Liquidação", "Motivo"]
+            fmt = {"Valor (R$)": "R$ {:,.0f}"}
 
-            # Resgates vs Aplicações side by side
-            resgates = plan_df[plan_df["Operação"] == "Resgate"]
+            # ── Seção 1: Cobertura de Passivos ──
+            cobertura = plan_df[plan_df["Motivo"].str.contains("passivo", case=False, na=False)]
+            if not cobertura.empty:
+                st.markdown("### 🎯 Cobertura de Passivos")
+                st.caption("Resgates programados para que o dinheiro chegue a tempo de pagar os resgates de investidores.")
+                st.dataframe(
+                    cobertura[display_cols].style.format(fmt),
+                    use_container_width=True, hide_index=True,
+                )
+                st.metric("Total Resgates (Cobertura)", f"R$ {cobertura['Valor (R$)'].sum():,.0f}")
+
+            # ── Seção 2: Resgates de Rebalanceamento ──
+            resgates_rebal = plan_df[
+                (plan_df["Operação"] == "Resgate") &
+                (~plan_df["Motivo"].str.contains("passivo", case=False, na=False))
+            ]
+            if not resgates_rebal.empty:
+                st.markdown("### 📤 Resgates (Rebalanceamento)")
+                st.caption("Resgates adicionais para ajustar a carteira ao modelo.")
+                st.dataframe(
+                    resgates_rebal[display_cols].style.format(fmt),
+                    use_container_width=True, hide_index=True,
+                )
+                st.metric("Total Resgates (Rebalanceamento)", f"R$ {resgates_rebal['Valor (R$)'].sum():,.0f}")
+
+            # ── Seção 3: Aplicações ──
             aplicacoes = plan_df[plan_df["Operação"] == "Aplicação"]
+            if not aplicacoes.empty:
+                st.markdown("### 📥 Aplicações")
+                st.caption("Aplicações programadas para quando o caixa dos resgates estiver disponível.")
+                st.dataframe(
+                    aplicacoes[display_cols].style.format(fmt),
+                    use_container_width=True, hide_index=True,
+                )
+                st.metric("Total Aplicações", f"R$ {aplicacoes['Valor (R$)'].sum():,.0f}")
 
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("**📤 Resgates:**")
-                if not resgates.empty:
-                    st.dataframe(
-                        resgates[["Prioridade", "Ativo", "Valor (R$)", "D+", "Data Liquidação"]].style.format({"Valor (R$)": "R$ {:,.0f}"}),
-                        use_container_width=True, hide_index=True,
+            # ── Nenhum movimento ──
+            if cobertura.empty and resgates_rebal.empty and aplicacoes.empty:
+                st.info("Nenhum movimento necessário.")
+
+            # ── Timeline Visual (Gantt) ──
+            st.markdown("### 📅 Timeline do Plano")
+            try:
+                fig_gantt = go.Figure()
+
+                # Passivo markers (vertical red lines)
+                passivo_dates = set()
+                for m in all_movements:
+                    if m["operation"] == "Resgate Passivo" and pd.notna(m.get("liquidation_date")):
+                        ld = pd.Timestamp(m["liquidation_date"])
+                        if ld >= pd.Timestamp(plan_date):
+                            passivo_dates.add(ld)
+
+                for i, row in plan_df.iterrows():
+                    req = pd.to_datetime(row["Data Solicitação"], dayfirst=True)
+                    liq = pd.to_datetime(row["Data Liquidação"], dayfirst=True)
+                    color = TAG["vermelho"] if row["Operação"] == "Resgate" else TAG["chart"][2]
+                    label = f"{row['Ativo'][:25]}"
+
+                    fig_gantt.add_trace(go.Bar(
+                        x=[max((liq - req).days, 1)],
+                        y=[label],
+                        base=[req],
+                        orientation="h",
+                        marker_color=color,
+                        marker_line_width=0,
+                        text=f"R$ {row['Valor (R$)']:,.0f}",
+                        textposition="inside",
+                        hovertemplate=(
+                            f"<b>{row['Ativo'][:30]}</b><br>"
+                            f"Operação: {row['Operação']}<br>"
+                            f"Solicitação: {row['Data Solicitação']}<br>"
+                            f"Liquidação: {row['Data Liquidação']}<br>"
+                            f"Valor: R$ {row['Valor (R$)']:,.0f}<br>"
+                            f"Motivo: {row['Motivo']}<extra></extra>"
+                        ),
+                        showlegend=False,
+                    ))
+
+                # Add vertical lines for passivo dates
+                for pd_date in passivo_dates:
+                    fig_gantt.add_vline(
+                        x=pd_date, line_dash="dash", line_color=TAG["vermelho"],
+                        line_width=2, opacity=0.7,
+                        annotation_text=f"Passivo {pd_date.strftime('%d/%m')}",
+                        annotation_position="top",
+                        annotation_font_color=TAG["vermelho"],
                     )
-                    st.metric("Total", f"R$ {resgates['Valor (R$)'].sum():,.0f}")
-                else:
-                    st.info("Nenhum resgate necessário.")
-            with col2:
-                st.markdown("**📥 Aplicações:**")
-                if not aplicacoes.empty:
-                    st.dataframe(
-                        aplicacoes[["Prioridade", "Ativo", "Valor (R$)", "D+", "Data Liquidação"]].style.format({"Valor (R$)": "R$ {:,.0f}"}),
-                        use_container_width=True, hide_index=True,
-                    )
-                    st.metric("Total", f"R$ {aplicacoes['Valor (R$)'].sum():,.0f}")
-                else:
-                    st.info("Nenhuma aplicação necessária.")
+
+                fig_gantt.update_layout(
+                    **PLOTLY_LAYOUT, height=max(300, len(plan_df) * 40 + 100),
+                    xaxis_title="Data", yaxis_title="",
+                    xaxis_type="date",
+                    bargap=0.3,
+                )
+                st.plotly_chart(fig_gantt, use_container_width=True)
+            except Exception:
+                pass  # Non-critical visualization
 
             st.divider()
 
