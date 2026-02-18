@@ -57,7 +57,7 @@ PLOTLY_LAYOUT = dict(
     ),
     legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=12)),
     colorway=TAG["chart"],
-    hoverlabel=dict(bgcolor=TAG["bg_panel"], font_size=12, font_color=TAG["offwhite"]),
+    hoverlabel=dict(bgcolor=TAG["bg_card"], font_size=12, font_color=TAG["offwhite"]),
 )
 
 # ─────────────────────────────────────────────────────────
