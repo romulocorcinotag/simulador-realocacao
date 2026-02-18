@@ -2434,62 +2434,120 @@ elif page == "🎯 Carteira Modelo":
             if cobertura.empty and resgates_rebal.empty and aplicacoes.empty:
                 st.info("Nenhum movimento necessário.")
 
-            # ── Timeline Visual (Gantt) ──
-            st.markdown("### 📅 Timeline do Plano")
-            try:
-                fig_gantt = go.Figure()
+            # ── Timeline Visual ──
+            st.markdown("### 📅 Cronograma de Liquidações")
+            st.caption("Cada linha mostra quando solicitar e quando o dinheiro liquida. Linhas vermelhas tracejadas = prazo dos passivos.")
 
-                # Passivo markers (vertical red lines)
-                passivo_dates = set()
+            try:
+                # Collect passivo dates
+                passivo_dates = {}
                 for m in all_movements:
                     if m["operation"] == "Resgate Passivo" and pd.notna(m.get("liquidation_date")):
                         ld = pd.Timestamp(m["liquidation_date"])
                         if ld >= pd.Timestamp(plan_date):
-                            passivo_dates.add(ld)
+                            passivo_dates[ld] = passivo_dates.get(ld, 0) + m["value"]
 
-                for i, row in plan_df.iterrows():
+                fig_tl = go.Figure()
+
+                # One horizontal arrow per movement: solicitação → liquidação
+                y_labels = []
+                for idx, (_, row) in enumerate(plan_df.iterrows()):
                     req = pd.to_datetime(row["Data Solicitação"], dayfirst=True)
                     liq = pd.to_datetime(row["Data Liquidação"], dayfirst=True)
-                    color = TAG["vermelho"] if row["Operação"] == "Resgate" else TAG["chart"][2]
-                    label = f"{row['Ativo'][:25]}"
+                    is_resgate = row["Operação"] == "Resgate"
+                    color = TAG["vermelho"] if is_resgate else TAG["chart"][2]
+                    y_val = len(plan_df) - idx  # top to bottom
+                    short_name = row["Ativo"][:22]
+                    y_labels.append((y_val, short_name))
 
-                    fig_gantt.add_trace(go.Bar(
-                        x=[max((liq - req).days, 1)],
-                        y=[label],
-                        base=[req],
-                        orientation="h",
-                        marker_color=color,
-                        marker_line_width=0,
-                        text=f"R$ {row['Valor (R$)']:,.0f}",
-                        textposition="inside",
-                        hovertemplate=(
-                            f"<b>{row['Ativo'][:30]}</b><br>"
-                            f"Operação: {row['Operação']}<br>"
-                            f"Solicitação: {row['Data Solicitação']}<br>"
-                            f"Liquidação: {row['Data Liquidação']}<br>"
-                            f"Valor: R$ {row['Valor (R$)']:,.0f}<br>"
-                            f"Motivo: {row['Motivo']}<extra></extra>"
-                        ),
-                        showlegend=False,
+                    # Connecting line (solicitação → liquidação)
+                    fig_tl.add_trace(go.Scatter(
+                        x=[req, liq], y=[y_val, y_val],
+                        mode="lines",
+                        line=dict(color=color, width=3),
+                        showlegend=False, hoverinfo="skip",
                     ))
 
-                # Add vertical lines for passivo dates
-                for pd_date in passivo_dates:
-                    fig_gantt.add_vline(
+                    # Solicitação marker (circle)
+                    fig_tl.add_trace(go.Scatter(
+                        x=[req], y=[y_val],
+                        mode="markers+text",
+                        marker=dict(size=10, color=TAG["bg_dark"], line=dict(color=color, width=2)),
+                        text=[f"Solic. {req.strftime('%d/%m')}"],
+                        textposition="bottom center",
+                        textfont=dict(size=9, color=TAG["offwhite"]),
+                        showlegend=False,
+                        hovertemplate=(
+                            f"<b>Solicitação</b><br>{short_name}<br>"
+                            f"{row['Operação']}: R$ {row['Valor (R$)']:,.0f}<br>"
+                            f"Data: {row['Data Solicitação']}<extra></extra>"
+                        ),
+                    ))
+
+                    # Liquidação marker (filled)
+                    symbol = "triangle-right" if is_resgate else "diamond"
+                    fig_tl.add_trace(go.Scatter(
+                        x=[liq], y=[y_val],
+                        mode="markers+text",
+                        marker=dict(size=12, color=color, symbol=symbol),
+                        text=[f"R$ {row['Valor (R$)']:,.0f}"],
+                        textposition="top center",
+                        textfont=dict(size=10, color=color, family="Inter"),
+                        showlegend=False,
+                        hovertemplate=(
+                            f"<b>Liquidação</b><br>{short_name}<br>"
+                            f"{row['Operação']}: R$ {row['Valor (R$)']:,.0f}<br>"
+                            f"Data: {row['Data Liquidação']}<br>"
+                            f"D+: {row['D+']}<br>"
+                            f"Motivo: {row['Motivo']}<extra></extra>"
+                        ),
+                    ))
+
+                # Vertical dashed lines for passivo deadlines
+                for pd_date, pd_val in passivo_dates.items():
+                    fig_tl.add_vline(
                         x=pd_date, line_dash="dash", line_color=TAG["vermelho"],
-                        line_width=2, opacity=0.7,
-                        annotation_text=f"Passivo {pd_date.strftime('%d/%m')}",
-                        annotation_position="top",
-                        annotation_font_color=TAG["vermelho"],
+                        line_width=2, opacity=0.8,
+                    )
+                    fig_tl.add_annotation(
+                        x=pd_date, y=len(plan_df) + 0.7,
+                        text=f"Passivo {pd_date.strftime('%d/%m')}<br>R$ {pd_val:,.0f}",
+                        showarrow=False, font=dict(size=10, color=TAG["vermelho"]),
+                        bgcolor=TAG["bg_dark"], bordercolor=TAG["vermelho"], borderwidth=1,
+                        borderpad=3,
                     )
 
-                fig_gantt.update_layout(
-                    **PLOTLY_LAYOUT, height=max(300, len(plan_df) * 40 + 100),
-                    xaxis_title="Data", yaxis_title="",
-                    xaxis_type="date",
-                    bargap=0.3,
+                # Y-axis with fund names
+                fig_tl.update_layout(
+                    **PLOTLY_LAYOUT,
+                    height=max(350, len(plan_df) * 55 + 120),
+                    xaxis=dict(title="Data", type="date", gridcolor=f"{TAG['offwhite']}15"),
+                    yaxis=dict(
+                        tickvals=[yl[0] for yl in y_labels],
+                        ticktext=[yl[1] for yl in y_labels],
+                        title="",
+                    ),
+                    margin=dict(l=160),
                 )
-                st.plotly_chart(fig_gantt, use_container_width=True)
+
+                # Legend manual via annotations
+                c_res = TAG["vermelho"]
+                c_apl = TAG["chart"][2]
+                legend_txt = (
+                    f"<span style='color:{c_res}'>▶ Resgate</span>"
+                    f"  &nbsp;  "
+                    f"<span style='color:{c_apl}'>◆ Aplicação</span>"
+                    f"  &nbsp;  "
+                    f"<span style='color:{c_res}'>┆ Prazo Passivo</span>"
+                    f"  &nbsp;  ○ Solicitação  →  Liquidação"
+                )
+                fig_tl.add_annotation(
+                    x=0.01, y=-0.12, xref="paper", yref="paper",
+                    text=legend_txt,
+                    showarrow=False, font=dict(size=11, color=TAG["offwhite"]),
+                )
+
+                st.plotly_chart(fig_tl, use_container_width=True)
             except Exception:
                 pass  # Non-critical visualization
 
