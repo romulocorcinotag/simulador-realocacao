@@ -2178,6 +2178,7 @@ elif page == "📊 Projeção da Carteira":
         ativos = ctx["ativos"]
         carteira = ctx["carteira"]
         caixa_initial = ctx["caixa_initial"]
+        pl_total = ctx["pl_total"]
         all_movements = ctx["all_movements"]
 
         # ── Add manual movement inline ──
@@ -2367,21 +2368,46 @@ elif page == "📊 Projeção da Carteira":
                         st.metric("Caixa Efetivo Inicial", f"R$ {caixa_initial:,.0f}")
 
                 # B. Run cash flow analysis
+                # If model is loaded, include plan movements in the timeline
+                cf_movements = all_movements
+                plan_included = False
+                if st.session_state.get("model_loaded") and not st.session_state.model_df.empty:
+                    model_df_cf = st.session_state.model_df
+                    adh_cf, _ = build_adherence_analysis(ativos, model_df_cf, all_movements, caixa_initial, pl_total)
+                    _, plan_movs_cf, _ = generate_smart_rebalancing_plan(
+                        adh_cf, liquid_df, all_movements, caixa_initial,
+                        ativos, cash_fund_codes, today=pd.Timestamp(datetime.today().date())
+                    )
+                    if plan_movs_cf:
+                        cf_movements = all_movements + plan_movs_cf
+                        plan_included = True
+
                 suggestions, negative_dates, df_timeline, initial_cash = suggest_request_dates(
-                    all_movements, liquid_df, cash_fund_codes, caixa_initial, ativos
+                    cf_movements, liquid_df, cash_fund_codes, caixa_initial, ativos
                 )
+
+                if plan_included:
+                    st.info(
+                        f"Fluxo de caixa inclui {len(plan_movs_cf)} movimentos do plano de realocacao "
+                        f"(baseado na carteira modelo). Para detalhes, va em Carteira Modelo."
+                    )
+                else:
+                    if st.session_state.get("model_loaded"):
+                        st.caption("Fluxo de caixa inclui provisoes + plano de realocacao da carteira modelo.")
+                    else:
+                        st.caption("Fluxo de caixa baseado apenas nas provisoes. Carregue uma carteira modelo para incluir o plano de realocacao.")
 
                 # C. Alerts
                 if negative_dates:
                     st.error(
-                        f"ATENÇÃO: Caixa ficará negativo em "
-                        f"{len(negative_dates)} data(s)! O fundo não pode operar assim."
+                        f"ATENCAO: Caixa ficara negativo em "
+                        f"{len(negative_dates)} data(s)! O fundo nao pode operar assim."
                     )
                     for nd in negative_dates[:5]:  # Show first 5
                         st.warning(
                             f"{nd['date'].strftime('%d/%m/%Y')} — "
                             f"Saldo: R$ {nd['balance']:,.0f} — "
-                            f"Déficit: R$ {nd['shortfall']:,.0f}"
+                            f"Deficit: R$ {nd['shortfall']:,.0f}"
                         )
                     if len(negative_dates) > 5:
                         st.caption(f"... e mais {len(negative_dates) - 5} datas com saldo negativo.")
@@ -2829,13 +2855,9 @@ elif page == "🎯 Carteira Modelo":
                     st.caption("Gap restante apos execucao do plano: verde = aderente, azul = acima, vermelho = abaixo.")
                     st.plotly_chart(fig_delta, use_container_width=True)
 
-            # ── CASH FLOW for combined movements ──
+            # ── CASH FLOW validation ──
             st.divider()
-            st.subheader("📈 Fluxo de Caixa Diário (Provisões + Plano)")
-            st.caption(
-                "Simulacao dia a dia do caixa efetivo (CAIXA + fundos estrategia Caixa). "
-                "O saldo NUNCA pode ficar negativo — esta e a principal validacao do plano."
-            )
+            st.subheader("📈 Validacao do Caixa")
 
             # Show plan summary metrics
             n_resg_plan = sum(1 for m in plan_movements if m["operation"] == "Resgate")
@@ -2843,10 +2865,10 @@ elif page == "🎯 Carteira Modelo":
             val_resg_plan = sum(m["value"] for m in plan_movements if m["operation"] == "Resgate")
             val_aplic_plan = sum(m["value"] for m in plan_movements if "Aplicação" in m["operation"])
             mc1, mc2, mc3, mc4 = st.columns(4)
-            mc1.metric("Provisoes Existentes", f"{len(all_movements)} movimentos")
-            mc2.metric("Resgates do Plano", f"{n_resg_plan}", f"R$ {val_resg_plan:,.0f}")
-            mc3.metric("Aplicacoes do Plano", f"{n_aplic_plan}", f"R$ {val_aplic_plan:,.0f}")
-            mc4.metric("Total Combinado", f"{len(combined_movements)} movimentos")
+            mc1.metric("Provisoes", f"{len(all_movements)}")
+            mc2.metric("Resgates (Plano)", f"{n_resg_plan}", f"R$ {val_resg_plan:,.0f}")
+            mc3.metric("Aplicacoes (Plano)", f"{n_aplic_plan}", f"R$ {val_aplic_plan:,.0f}")
+            mc4.metric("Liquido no Caixa", f"R$ {val_resg_plan - val_aplic_plan:,.0f}")
 
             cash_fund_codes = ctx.get("cash_fund_codes", set())
             sug_plan, neg_plan, tl_plan, init_plan = suggest_request_dates(
@@ -2868,9 +2890,17 @@ elif page == "🎯 Carteira Modelo":
                 if not tl_plan.empty:
                     st.success("Plano viavel! Caixa positivo em todas as datas.")
 
+            st.caption(
+                "O grafico de caixa mostra o saldo da linha CAIXA ao longo do tempo. "
+                "Como os resgates e aplicacoes do plano se compensam (dinheiro entra e sai), "
+                "o saldo de caixa pode parecer estavel mesmo com mudancas no modelo. "
+                "Os graficos de composicao acima mostram o impacto real na carteira."
+            )
+
             if not tl_plan.empty:
-                fig_plan = build_cashflow_chart(tl_plan)
-                st.plotly_chart(fig_plan, use_container_width=True)
+                with st.expander("Ver grafico de fluxo de caixa diario", expanded=True):
+                    fig_plan = build_cashflow_chart(tl_plan)
+                    st.plotly_chart(fig_plan, use_container_width=True)
 
                 # Show event-day summary table
                 event_tl = tl_plan[tl_plan["Tem Evento"]].copy()
