@@ -1310,7 +1310,7 @@ def generate_smart_rebalancing_plan(
 
     # ── FASE 3: Resgates de Rebalanceamento (overweight restante) ──
     for code, fund in catalog.items():
-        if fund["is_cash"] or not fund["is_overweight"]:
+        if not fund["is_overweight"]:
             continue
         remaining_gap = fund["max_model_resgate"] - fund["already_redeemed"]
         if remaining_gap < 100:
@@ -1322,8 +1322,10 @@ def generate_smart_rebalancing_plan(
                         req_date, settle_date, "Rebalanceamento (acima do modelo)",
                         "plano_rebalanceamento")
         fund["already_redeemed"] += remaining_gap
-        cash_events.setdefault(settle_date, 0.0)
-        cash_events[settle_date] += remaining_gap
+        # Cash funds: resgate is neutral for effective cash
+        if not fund["is_cash"]:
+            cash_events.setdefault(settle_date, 0.0)
+            cash_events[settle_date] += remaining_gap
 
     # ── FASE 4: Aplicações com verificação dia-a-dia de caixa ──
     # Build a sorted timeline of ALL future business days with events
@@ -1344,12 +1346,12 @@ def generate_smart_rebalancing_plan(
         current += timedelta(days=1)
 
     # Find earliest date when cash is stable and positive for applications
-    # Applications withdraw cash immediately on request_date
+    # Cash funds are included but don't affect effective cash
     underweight_funds = [
         (code, fund) for code, fund in catalog.items()
-        if fund["is_underweight"] and not fund["is_cash"]
+        if fund["is_underweight"]
     ]
-    underweight_funds.sort(key=lambda x: x[1]["gap_rs"], reverse=True)
+    underweight_funds.sort(key=lambda x: (0 if x[1]["is_cash"] else 1, -x[1]["gap_rs"]))
 
     # Find the first business day where cash stays positive from there on
     sorted_days = sorted(daily_cash.keys())
@@ -1361,14 +1363,25 @@ def generate_smart_rebalancing_plan(
             running_min = min(running_min, daily_cash[d])
             min_future[d] = running_min
 
-    plan_outflows = {}  # track planned application outflows by date
+    plan_outflows = {}  # track planned application outflows by date (non-cash only)
 
     for code, fund in underweight_funds:
         gap = fund["gap_rs"] - fund["already_applied"]
         if gap < 100:
             continue
 
-        # Find earliest date we can request this application
+        # Cash funds: application is neutral (CAIXA → cash fund = zero impact on effective cash)
+        # So we can schedule immediately without cash constraints
+        if fund["is_cash"]:
+            best_date = today
+            settle_date = add_business_days(best_date, fund["d_conv_aplic"], "Úteis")
+            _add_plan_entry(plan_rows, plan_movements, fund, "Aplicação", gap,
+                            best_date, settle_date, "Rebalanceamento (abaixo do modelo)",
+                            "plano_rebalanceamento")
+            fund["already_applied"] += gap
+            continue
+
+        # Non-cash funds: find earliest date we can request this application
         # On that date, cash must stay >= 0 after this withdrawal
         best_date = None
         for d in sorted_days:
