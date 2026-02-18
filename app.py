@@ -2219,8 +2219,8 @@ elif page == "📊 Projeção da Carteira":
                     fig_cf.update_layout(
                         **PLOTLY_LAYOUT, height=450, barmode="overlay",
                         yaxis_title="R$", xaxis_title="Data",
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                     )
+                    fig_cf.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
                     st.plotly_chart(fig_cf, use_container_width=True)
 
                 # E. Suggestions table
@@ -2518,9 +2518,8 @@ elif page == "🎯 Carteira Modelo":
                     )
 
                 # Y-axis with fund names
+                fig_tl.update_layout(**PLOTLY_LAYOUT, height=max(350, len(plan_df) * 55 + 120))
                 fig_tl.update_layout(
-                    **PLOTLY_LAYOUT,
-                    height=max(350, len(plan_df) * 55 + 120),
                     xaxis=dict(title="Data", type="date", gridcolor=f"{TAG['offwhite']}15"),
                     yaxis=dict(
                         tickvals=[yl[0] for yl in y_labels],
@@ -2647,8 +2646,8 @@ elif page == "🎯 Carteira Modelo":
                 fig_plan.update_layout(
                     **PLOTLY_LAYOUT, height=400, barmode="overlay",
                     yaxis_title="R$", xaxis_title="Data",
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                 )
+                fig_plan.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
                 st.plotly_chart(fig_plan, use_container_width=True)
 
             if sug_plan:
