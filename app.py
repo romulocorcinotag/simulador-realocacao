@@ -1900,14 +1900,76 @@ if page == "📂 Importar Dados":
             st.success(f"✅ Modelo carregado: {len(model_df)} ativos, total {model_df['% Alvo'].sum():.1f}%")
 
         if st.session_state.model_loaded:
-            model_df = st.session_state.model_df
-            col1, col2 = st.columns([2, 1])
-            with col1:
-                st.dataframe(
-                    model_df.style.format({"% Alvo": "{:.2f}%"}),
-                    use_container_width=True, hide_index=True,
-                )
-            with col2:
+            model_df = st.session_state.model_df.copy()
+
+            st.markdown("#### Editar % Alvo")
+            st.caption("Altere os valores diretamente na tabela. Para remover um ativo, coloque 0%.")
+
+            edited_df = st.data_editor(
+                model_df,
+                column_config={
+                    "Código": st.column_config.TextColumn("Código", disabled=True),
+                    "Ativo": st.column_config.TextColumn("Ativo", disabled=True),
+                    "% Alvo": st.column_config.NumberColumn(
+                        "% Alvo", min_value=0, max_value=100, step=0.1, format="%.2f%%",
+                    ),
+                },
+                use_container_width=True, hide_index=True,
+                key="model_editor",
+            )
+
+            # Detect changes and apply
+            if not edited_df.equals(st.session_state.model_df):
+                # Remove rows with 0% and save
+                edited_df = edited_df[edited_df["% Alvo"] > 0].reset_index(drop=True)
+                st.session_state.model_df = edited_df
+                model_df = edited_df
+                st.rerun()
+
+            total_pct = model_df["% Alvo"].sum()
+            remaining = 100 - total_pct
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Total Alocado", f"{total_pct:.1f}%")
+            c2.metric("Caixa (residual)", f"{max(0, remaining):.1f}%")
+            c3.metric("Ativos no Modelo", len(model_df))
+
+            if total_pct > 100:
+                st.error(f"Total ultrapassa 100%! Excesso de {total_pct - 100:.1f} p.p.")
+
+            # ── Adicionar Novo Ativo ──
+            st.divider()
+            st.markdown("#### Adicionar Ativo ao Modelo")
+
+            with st.form("add_model_asset", clear_on_submit=True):
+                ac1, ac2, ac3 = st.columns([1, 2, 1])
+                new_code = ac1.text_input("Código", placeholder="Ex: 1234")
+                new_name = ac2.text_input("Nome do Ativo", placeholder="Ex: BTG Pactual Tesouro SELIC")
+                new_pct = ac3.number_input("% Alvo", min_value=0.0, max_value=100.0, step=0.5, value=0.0)
+
+                submitted = st.form_submit_button("Adicionar ao Modelo", type="primary")
+                if submitted:
+                    if new_pct <= 0:
+                        st.warning("Informe um % Alvo maior que zero.")
+                    elif not new_name.strip():
+                        st.warning("Informe o nome do ativo.")
+                    else:
+                        new_row = pd.DataFrame([{
+                            "Código": new_code.strip(),
+                            "Ativo": new_name.strip(),
+                            "% Alvo": new_pct,
+                        }])
+                        # Check duplicate
+                        existing_codes = set(model_df["Código"].astype(str))
+                        if new_code.strip() in existing_codes and new_code.strip():
+                            st.warning(f"Código {new_code} já existe no modelo. Altere o % Alvo na tabela acima.")
+                        else:
+                            st.session_state.model_df = pd.concat(
+                                [st.session_state.model_df, new_row], ignore_index=True
+                            )
+                            st.rerun()
+
+            # ── Gráfico ──
+            if not model_df.empty:
                 fig = px.pie(model_df, values="% Alvo", names="Ativo", hole=0.45,
                              color_discrete_sequence=TAG["chart"])
                 fig.update_traces(textposition="inside", textinfo="percent+label",
