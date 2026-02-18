@@ -2713,37 +2713,74 @@ elif page == "🎯 Carteira Modelo":
                 display_provisions_summary(combined_movements, expanded=False)
                 display_evolution_tables(df_evo_fin, df_evo_pct, evo_date_cols, model_map=model_map)
 
-                # Final comparison chart
+                # Final comparison chart: Atual → Projeção → Modelo
                 if evo_date_cols:
                     last_dc = evo_date_cols[-1]
-                    st.subheader(f"Comparação Final: {last_dc} vs Modelo")
+                    st.subheader(f"Convergencia ao Modelo: Atual → {last_dc}")
+                    st.caption("Compare a posicao atual, a projecao apos executar o plano e o % alvo do modelo.")
                     df_evo_pct_display = df_evo_pct.copy()
-                    df_evo_pct_display["🎯 Modelo"] = df_evo_pct_display["Código"].map(model_map).fillna(0)
-                    df_evo_pct_display = df_evo_pct_display.drop(columns=["Código"])
+                    df_evo_pct_display["Modelo"] = df_evo_pct_display["Código"].map(model_map).fillna(0)
                     cmp = df_evo_pct_display[~df_evo_pct_display["Ativo"].isin(["📊 TOTAL PL"])].copy()
-                    cmp = cmp.sort_values(last_dc, ascending=True)
+                    cmp = cmp.sort_values("Modelo", ascending=True)
                     fig_cmp = go.Figure()
+                    # Bar 1: Current position
                     fig_cmp.add_trace(go.Bar(
-                        name=f"Projeção {last_dc}", y=cmp["Ativo"], x=cmp[last_dc],
+                        name="% Atual (Hoje)", y=cmp["Ativo"], x=cmp["Atual (%)"],
+                        orientation="h", marker_color=TAG["chart"][9], marker_line_width=0,
+                        text=cmp["Atual (%)"].apply(lambda v: f"{v:.1f}%"),
+                        textposition="auto", textfont=dict(size=10, color=TAG["offwhite"]),
+                        hovertemplate="<b>%{y}</b><br>Atual: %{x:.2f}%<extra></extra>",
+                    ))
+                    # Bar 2: Projected after plan
+                    fig_cmp.add_trace(go.Bar(
+                        name=f"% Projetado ({last_dc})", y=cmp["Ativo"], x=cmp[last_dc],
                         orientation="h", marker_color=TAG["chart"][1], marker_line_width=0,
                         text=cmp[last_dc].apply(lambda v: f"{v:.1f}%"),
-                        textposition="auto", textfont=dict(size=11, color=TAG["offwhite"]),
+                        textposition="auto", textfont=dict(size=10, color=TAG["offwhite"]),
+                        hovertemplate="<b>%{y}</b><br>Projetado: %{x:.2f}%<extra></extra>",
                     ))
+                    # Bar 3: Model target
                     fig_cmp.add_trace(go.Bar(
-                        name="Modelo", y=cmp["Ativo"], x=cmp["🎯 Modelo"],
+                        name="% Modelo (Alvo)", y=cmp["Ativo"], x=cmp["Modelo"],
                         orientation="h", marker_color=TAG["laranja"], marker_line_width=0,
-                        text=cmp["🎯 Modelo"].apply(lambda v: f"{v:.1f}%"),
-                        textposition="auto", textfont=dict(size=11, color=TAG["offwhite"]),
+                        text=cmp["Modelo"].apply(lambda v: f"{v:.1f}%"),
+                        textposition="auto", textfont=dict(size=10, color=TAG["offwhite"]),
+                        hovertemplate="<b>%{y}</b><br>Modelo: %{x:.2f}%<extra></extra>",
                     ))
                     fig_cmp.update_layout(**PLOTLY_LAYOUT, barmode="group",
-                                          height=max(350, len(cmp) * 40 + 80))
+                                          height=max(400, len(cmp) * 50 + 100))
                     fig_cmp.update_layout(
                         xaxis_title="% PL", yaxis_title="",
                         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
                                     bgcolor="rgba(0,0,0,0)"),
-                        margin=dict(l=160),
+                        margin=dict(l=180),
                     )
                     st.plotly_chart(fig_cmp, use_container_width=True)
+
+                    # Delta chart: show gap remaining after plan
+                    cmp["Gap Restante"] = cmp[last_dc] - cmp["Modelo"]
+                    cmp_sorted = cmp.sort_values("Gap Restante")
+                    fig_delta = go.Figure()
+                    colors = [TAG["chart"][2] if g >= -0.5 and g <= 0.5
+                              else TAG["chart"][1] if g > 0.5
+                              else TAG["chart"][4]
+                              for g in cmp_sorted["Gap Restante"]]
+                    fig_delta.add_trace(go.Bar(
+                        y=cmp_sorted["Ativo"], x=cmp_sorted["Gap Restante"],
+                        orientation="h", marker_color=colors, marker_line_width=0,
+                        text=cmp_sorted["Gap Restante"].apply(lambda v: f"{v:+.1f} p.p."),
+                        textposition="outside", textfont=dict(size=11, color=TAG["offwhite"]),
+                        hovertemplate="<b>%{y}</b><br>Gap: %{x:+.2f} p.p.<extra></extra>",
+                    ))
+                    fig_delta.add_vline(x=0, line_color="rgba(230,228,219,0.3)", line_width=1)
+                    fig_delta.update_layout(**PLOTLY_LAYOUT,
+                                            height=max(300, len(cmp_sorted) * 35 + 80))
+                    fig_delta.update_layout(
+                        xaxis_title="Gap vs Modelo (p.p.)", yaxis_title="",
+                        margin=dict(l=180),
+                    )
+                    st.caption("Gap restante apos execucao do plano: verde = aderente, azul = acima, vermelho = abaixo.")
+                    st.plotly_chart(fig_delta, use_container_width=True)
 
             # ── CASH FLOW for combined movements ──
             st.divider()
