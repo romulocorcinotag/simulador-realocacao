@@ -1458,70 +1458,117 @@ def generate_smart_rebalancing_plan(
 
 def build_cashflow_chart(df_timeline):
     """Build a clean cash flow chart from a timeline DataFrame. Returns a plotly Figure."""
+    if df_timeline.empty:
+        fig = go.Figure()
+        fig.update_layout(**PLOTLY_LAYOUT, height=300)
+        fig.add_annotation(text="Sem dados para exibir", showarrow=False,
+                           font=dict(size=16, color=TAG["text_muted"]), xref="paper", yref="paper", x=0.5, y=0.5)
+        return fig
+
     fig = go.Figure()
 
-    # Main line: saldo over time
+    # Build per-day custom hover text for the main line
+    main_hover = []
+    for _, row in df_timeline.iterrows():
+        d = row["Data"]
+        s = row["Saldo (R$)"]
+        ent_val = row["Entradas (R$)"]
+        sai_val = row["Saídas (R$)"]
+        parts = [f"<b>{d.strftime('%d/%m/%Y')}</b>", f"Saldo: R$ {s:,.0f}"]
+        if ent_val > 0:
+            parts.append(f"Entradas: +R$ {ent_val:,.0f}")
+        if sai_val > 0:
+            parts.append(f"Saidas: -R$ {sai_val:,.0f}")
+        main_hover.append("<br>".join(parts) + "<extra></extra>")
+
+    # Main line: saldo over time (step line — balance is constant until next event)
     fig.add_trace(go.Scatter(
         x=df_timeline["Data"], y=df_timeline["Saldo (R$)"],
-        mode="lines", name="Saldo",
-        line=dict(color=TAG["chart"][2], width=2.5),
-        hovertemplate="<b>%{x|%d/%m/%Y}</b><br>Saldo: R$ %{y:,.0f}<extra></extra>",
+        mode="lines+markers", name="Saldo",
+        line=dict(color=TAG["chart"][2], width=2.5, shape="hv"),
+        marker=dict(size=3, color=TAG["chart"][2]),
+        hovertemplate=main_hover,
     ))
 
-    # Fill green above zero, red below
+    # Fill green above zero
     fig.add_trace(go.Scatter(
         x=df_timeline["Data"], y=df_timeline["Saldo (R$)"].clip(lower=0),
         fill="tozeroy", mode="none", name="Positivo",
         fillcolor="rgba(107,222,151,0.10)", showlegend=False,
+        hoverinfo="skip",
     ))
+
+    # Fill red below zero
     neg_vals = df_timeline["Saldo (R$)"].clip(upper=0)
     if (neg_vals < 0).any():
         fig.add_trace(go.Scatter(
             x=df_timeline["Data"], y=neg_vals,
             fill="tozeroy", mode="none", name="Negativo",
             fillcolor="rgba(237,90,110,0.15)", showlegend=False,
+            hoverinfo="skip",
         ))
         # X markers on negative days
         neg_days = df_timeline[df_timeline["Saldo (R$)"] < 0]
+        neg_hover = [
+            f"<b>DEFICIT</b><br>{d.strftime('%d/%m/%Y')}<br>R$ {s:,.0f}<extra></extra>"
+            for d, s in zip(neg_days["Data"], neg_days["Saldo (R$)"])
+        ]
         fig.add_trace(go.Scatter(
             x=neg_days["Data"], y=neg_days["Saldo (R$)"],
-            mode="markers", name="Déficit",
-            marker=dict(size=9, color=TAG["chart"][4], symbol="x", line=dict(width=1.5)),
-            hovertemplate="<b>DÉFICIT</b><br>%{x|%d/%m/%Y}<br>R$ %{y:,.0f}<extra></extra>",
+            mode="markers", name="Deficit",
+            marker=dict(size=10, color=TAG["chart"][4], symbol="x", line=dict(width=2)),
+            hovertemplate=neg_hover,
         ))
 
-    # Event day markers (entradas / saídas)
-    event_days = df_timeline[df_timeline["Tem Evento"]]
+    # Event day markers (entradas / saídas) — larger, more visible
+    event_days = df_timeline[df_timeline["Tem Evento"]].copy()
     if not event_days.empty:
         ent = event_days[event_days["Entradas (R$)"] > 0]
         sai = event_days[event_days["Saídas (R$)"] > 0]
         if not ent.empty:
+            ent_hover = [
+                f"<b>Entrada</b><br>{d.strftime('%d/%m/%Y')}<br>+R$ {v:,.0f}<br>Saldo: R$ {s:,.0f}<extra></extra>"
+                for d, v, s in zip(ent["Data"], ent["Entradas (R$)"], ent["Saldo (R$)"])
+            ]
             fig.add_trace(go.Scatter(
                 x=ent["Data"], y=ent["Saldo (R$)"],
                 mode="markers", name="Entrada",
-                marker=dict(size=8, color=TAG["chart"][2], symbol="triangle-up"),
-                hovertemplate="<b>Entrada</b><br>%{x|%d/%m/%Y}<br>+R$ " +
-                    ent["Entradas (R$)"].apply(lambda v: f"{v:,.0f}").values +
-                    "<extra></extra>",
+                marker=dict(size=10, color=TAG["chart"][2], symbol="triangle-up",
+                            line=dict(width=1, color=TAG["offwhite"])),
+                hovertemplate=ent_hover,
             ))
         if not sai.empty:
+            sai_hover = [
+                f"<b>Saida</b><br>{d.strftime('%d/%m/%Y')}<br>-R$ {v:,.0f}<br>Saldo: R$ {s:,.0f}<extra></extra>"
+                for d, v, s in zip(sai["Data"], sai["Saídas (R$)"], sai["Saldo (R$)"])
+            ]
             fig.add_trace(go.Scatter(
                 x=sai["Data"], y=sai["Saldo (R$)"],
-                mode="markers", name="Saída",
-                marker=dict(size=8, color=TAG["chart"][4], symbol="triangle-down"),
-                hovertemplate="<b>Saída</b><br>%{x|%d/%m/%Y}<br>-R$ " +
-                    sai["Saídas (R$)"].apply(lambda v: f"{v:,.0f}").values +
-                    "<extra></extra>",
+                mode="markers", name="Saida",
+                marker=dict(size=10, color=TAG["chart"][4], symbol="triangle-down",
+                            line=dict(width=1, color=TAG["offwhite"])),
+                hovertemplate=sai_hover,
             ))
 
     # Zero reference line
-    fig.add_hline(y=0, line_dash="dot", line_color="rgba(230,228,219,0.3)", line_width=1)
+    fig.add_hline(y=0, line_dash="dot", line_color="rgba(230,228,219,0.35)", line_width=1.5)
 
-    fig.update_layout(**PLOTLY_LAYOUT, height=380)
+    fig.update_layout(**PLOTLY_LAYOUT, height=400)
     fig.update_layout(
         xaxis_title="", yaxis_title="Saldo (R$)",
+        xaxis=dict(
+            tickformat="%d/%m",
+            dtick="D7",  # Tick every 7 days
+            tickangle=-45,
+        ),
+        yaxis=dict(
+            tickformat=",.0f",
+            tickprefix="R$ ",
+        ),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
                     bgcolor="rgba(0,0,0,0)", font=dict(size=11)),
+        dragmode="zoom",
+        hovermode="closest",
     )
     return fig
 
@@ -1613,7 +1660,9 @@ def style_evolution_table_rows(row):
 
 
 def display_evolution_tables(df_fin, df_pct, evo_date_cols, model_map=None):
-    """Display R$ and % PL evolution tables."""
+    """Display R$ and % PL evolution tables.
+    model_map: dict {código: % alvo} — uses fund code as key for reliable matching.
+    """
     evo_total_row = df_fin[df_fin["Ativo"] == "📊 TOTAL PL"].iloc[0]
 
     # PL metrics
@@ -1643,18 +1692,27 @@ def display_evolution_tables(df_fin, df_pct, evo_date_cols, model_map=None):
     for dc in evo_date_cols:
         fmt_pct[dc] = "{:.2f}%"
 
-    df_pct_display = df_pct.drop(columns=["Código"]).copy()
+    df_pct_display = df_pct.copy()
 
     if model_map:
-        df_pct_display["🎯 Modelo"] = df_pct_display["Ativo"].map(model_map).fillna(0)
+        # Map using Código (reliable) — model_map is {code: % alvo}
+        df_pct_display["🎯 Modelo"] = df_pct_display["Código"].map(model_map).fillna(0)
+        # Build a code→target lookup for color_vs_model
+        code_to_target = model_map
+        # Build ativo→code lookup for the color function
+        ativo_to_code = dict(zip(df_pct_display["Ativo"], df_pct_display["Código"]))
         fmt_pct["🎯 Modelo"] = "{:.2f}%"
+
+        # Now drop Código for display
+        df_pct_display = df_pct_display.drop(columns=["Código"])
 
         pct_value_cols = ["Atual (%)"] + evo_date_cols
 
         def color_vs_model(row):
             styles = []
             ativo = row["Ativo"]
-            target = model_map.get(ativo, None)
+            code = ativo_to_code.get(ativo, "")
+            target = code_to_target.get(code, None)
             for col in row.index:
                 if ativo == "📊 TOTAL PL":
                     styles.append(f"background-color: {TAG['vermelho']}40; font-weight: bold; color: {TAG['offwhite']}")
@@ -1696,6 +1754,7 @@ def display_evolution_tables(df_fin, df_pct, evo_date_cols, model_map=None):
             unsafe_allow_html=True,
         )
     else:
+        df_pct_display = df_pct_display.drop(columns=["Código"])
         st.dataframe(
             df_pct_display.style.format(fmt_pct).apply(style_evolution_table_rows, axis=1),
             use_container_width=True, hide_index=True, height=420,
@@ -2648,8 +2707,8 @@ elif page == "🎯 Carteira Modelo":
             if df_evo_fin is not None:
                 evo_date_cols = [c for c in df_evo_fin.columns if c not in ["Ativo", "Código", "Atual (R$)"]]
 
-                # Build model map for color comparison
-                model_map = dict(zip(adherence_df["Ativo"].str[:45], adherence_df["% Alvo (Modelo)"]))
+                # Build model map for color comparison — keyed by Código for reliable matching
+                model_map = dict(zip(adherence_df["Código"], adherence_df["% Alvo (Modelo)"]))
 
                 display_provisions_summary(combined_movements, expanded=False)
                 display_evolution_tables(df_evo_fin, df_evo_pct, evo_date_cols, model_map=model_map)
@@ -2658,8 +2717,9 @@ elif page == "🎯 Carteira Modelo":
                 if evo_date_cols:
                     last_dc = evo_date_cols[-1]
                     st.subheader(f"Comparação Final: {last_dc} vs Modelo")
-                    df_evo_pct_display = df_evo_pct.drop(columns=["Código"]).copy()
-                    df_evo_pct_display["🎯 Modelo"] = df_evo_pct_display["Ativo"].map(model_map).fillna(0)
+                    df_evo_pct_display = df_evo_pct.copy()
+                    df_evo_pct_display["🎯 Modelo"] = df_evo_pct_display["Código"].map(model_map).fillna(0)
+                    df_evo_pct_display = df_evo_pct_display.drop(columns=["Código"])
                     cmp = df_evo_pct_display[~df_evo_pct_display["Ativo"].isin(["📊 TOTAL PL"])].copy()
                     cmp = cmp.sort_values(last_dc, ascending=True)
                     fig_cmp = go.Figure()
