@@ -342,38 +342,33 @@ def match_fund_liquidation(fund_name, fund_code, liquid_df):
 def identify_cash_funds(ativos_df, liquid_df):
     """
     Identify funds in the portfolio that are cash-equivalent.
-    A fund is cash-equivalent if total D+ (Conversão Resgate + Liquid. Resgate) <= 1 business day.
+    A fund is cash if its ESTRATÉGIA column contains the word 'CAIXA'.
     Returns set of fund codes (str) and a list of dicts with details.
     """
     cod_col = find_col(ativos_df, "CÓD. ATIVO", "COD. ATIVO")
+    strat_col = find_col(ativos_df, "ESTRATÉGIA", "ESTRATEGIA")
     cash_codes = set()
     cash_details = []
     for _, row in ativos_df.iterrows():
         code = str(row[cod_col]) if cod_col else ""
         name = str(row.get("ATIVO", ""))
         fin = float(row.get("FINANCEIRO", 0))
-        liq_info = match_fund_liquidation(name, code, liquid_df)
-        if liq_info is not None:
-            conv = int(liq_info.get("Conversão Resgate", 0))
-            liq = int(liq_info.get("Liquid. Resgate", 0))
-            total_d = conv + liq
-            if total_d <= 1:
-                cash_codes.add(code)
-                cash_details.append({
-                    "Ativo": name[:50], "Código": code,
-                    "D+ Conv.": conv, "D+ Liq.": liq,
-                    "Total D+": total_d, "Financeiro (R$)": fin,
-                })
-        else:
-            # Fallback: known SELIC/treasury names
-            name_up = name.upper()
-            if any(kw in name_up for kw in ["TESOURO SELIC", "SELIC SIMPLES"]):
-                cash_codes.add(code)
-                cash_details.append({
-                    "Ativo": name[:50], "Código": code,
-                    "D+ Conv.": 0, "D+ Liq.": 1,
-                    "Total D+": 1, "Financeiro (R$)": fin,
-                })
+        estrategia = str(row.get(strat_col, "")).upper() if strat_col else ""
+
+        if "CAIXA" in estrategia:
+            cash_codes.add(code)
+            # Try to get D+ info for display
+            liq_info = match_fund_liquidation(name, code, liquid_df)
+            if liq_info is not None:
+                conv = int(liq_info.get("Conversão Resgate", 0))
+                liq = int(liq_info.get("Liquid. Resgate", 0))
+            else:
+                conv, liq = 0, 0
+            cash_details.append({
+                "Ativo": name[:50], "Código": code,
+                "Estratégia": estrategia, "D+ Conv.": conv, "D+ Liq.": liq,
+                "Financeiro (R$)": fin,
+            })
     return cash_codes, cash_details
 
 
