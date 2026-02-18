@@ -2670,6 +2670,124 @@ elif page == "🎯 Carteira Modelo":
                 st.warning(f"⚠️ {w['message']}")
 
         if not plan_df.empty:
+
+            # ══════════════════════════════════════════════════════
+            # ── TURNOVER DA CARTEIRA: Legenda de Entradas e Saídas ──
+            # ══════════════════════════════════════════════════════
+            st.markdown("### 🔄 Turnover da Carteira")
+
+            # Compute turnover data per asset
+            resgates_plan = plan_df[plan_df["Operação"] == "Resgate"].copy()
+            aplicacoes_plan = plan_df[plan_df["Operação"] == "Aplicação"].copy()
+
+            total_resgates = resgates_plan["Valor (R$)"].sum() if not resgates_plan.empty else 0
+            total_aplicacoes = aplicacoes_plan["Valor (R$)"].sum() if not aplicacoes_plan.empty else 0
+            turnover_total = total_resgates + total_aplicacoes
+            pl_proj = info["pl_projetado"]
+            turnover_pct = (turnover_total / pl_proj * 100) if pl_proj > 0 else 0
+
+            # Provisão passivos
+            passivo_movs = [m for m in all_movements if m["operation"] == "Resgate Passivo"]
+            total_passivo = sum(m["value"] for m in passivo_movs)
+            cotiz_movs = [m for m in all_movements if m["operation"] in ("Resgate (Cotizando)", "Resgate (Provisão)")]
+            total_cotiz = sum(m["value"] for m in cotiz_movs)
+
+            # Metrics row
+            tc1, tc2, tc3, tc4, tc5 = st.columns(5)
+            tc1.metric("Turnover Total", f"R$ {turnover_total:,.0f}", f"{turnover_pct:.1f}% do PL")
+            tc2.metric("Saídas (Resgates)", f"R$ {total_resgates:,.0f}", f"{len(resgates_plan)} operações")
+            tc3.metric("Entradas (Aplicações)", f"R$ {total_aplicacoes:,.0f}", f"{len(aplicacoes_plan)} operações")
+            tc4.metric("Passivos (Investidores)", f"R$ {total_passivo:,.0f}", f"{len(passivo_movs)} saídas")
+            tc5.metric("Cotizando (em trânsito)", f"R$ {total_cotiz:,.0f}", f"{len(cotiz_movs)} resgates")
+
+            # ── Build turnover chart per asset ──
+            # Aggregate resgates and aplicações by ativo
+            resg_by_ativo = resgates_plan.groupby("Ativo")["Valor (R$)"].sum().reset_index()
+            resg_by_ativo.columns = ["Ativo", "Resgate"]
+            aplic_by_ativo = aplicacoes_plan.groupby("Ativo")["Valor (R$)"].sum().reset_index()
+            aplic_by_ativo.columns = ["Ativo", "Aplicação"]
+
+            # Merge
+            turnover_df = pd.merge(resg_by_ativo, aplic_by_ativo, on="Ativo", how="outer").fillna(0)
+            turnover_df = turnover_df.sort_values("Resgate", ascending=True)
+
+            if not turnover_df.empty:
+                fig_turnover = go.Figure()
+
+                # Resgates (saídas) — negative bars (left side)
+                fig_turnover.add_trace(go.Bar(
+                    y=turnover_df["Ativo"], x=-turnover_df["Resgate"],
+                    name="Saída (Resgate)",
+                    orientation="h",
+                    marker_color=TAG["chart"][4],  # vermelho/rosa
+                    marker_line_width=0,
+                    text=turnover_df["Resgate"].apply(lambda v: f"R$ {v:,.0f}" if v > 0 else ""),
+                    textposition="auto",
+                    textfont=dict(size=10, color=TAG["offwhite"]),
+                    hovertemplate="<b>%{y}</b><br>Resgate: R$ %{customdata:,.0f}<extra></extra>",
+                    customdata=turnover_df["Resgate"],
+                ))
+
+                # Aplicações (entradas) — positive bars (right side)
+                fig_turnover.add_trace(go.Bar(
+                    y=turnover_df["Ativo"], x=turnover_df["Aplicação"],
+                    name="Entrada (Aplicação)",
+                    orientation="h",
+                    marker_color=TAG["chart"][2],  # verde
+                    marker_line_width=0,
+                    text=turnover_df["Aplicação"].apply(lambda v: f"R$ {v:,.0f}" if v > 0 else ""),
+                    textposition="auto",
+                    textfont=dict(size=10, color=TAG["offwhite"]),
+                    hovertemplate="<b>%{y}</b><br>Aplicação: R$ %{customdata:,.0f}<extra></extra>",
+                    customdata=turnover_df["Aplicação"],
+                ))
+
+                # Also add passivo outflows if any
+                if passivo_movs:
+                    pas_data = pd.DataFrame([{
+                        "Ativo": "PASSIVO (Investidores)",
+                        "Valor": total_passivo,
+                    }])
+                    fig_turnover.add_trace(go.Bar(
+                        y=pas_data["Ativo"], x=-pas_data["Valor"],
+                        name="Passivo (obrigação)",
+                        orientation="h",
+                        marker_color=TAG["vermelho"],
+                        marker_line_width=0,
+                        text=[f"R$ {total_passivo:,.0f}"],
+                        textposition="auto",
+                        textfont=dict(size=10, color=TAG["offwhite"]),
+                        hovertemplate="<b>Passivo</b><br>R$ %{customdata:,.0f}<extra></extra>",
+                        customdata=pas_data["Valor"],
+                    ))
+
+                fig_turnover.add_vline(x=0, line_color="rgba(230,228,219,0.4)", line_width=1.5)
+                fig_turnover.update_layout(**PLOTLY_LAYOUT, barmode="relative",
+                                           height=max(300, len(turnover_df) * 45 + 100))
+                fig_turnover.update_layout(
+                    xaxis_title="← Saídas (R$)          Entradas (R$) →",
+                    yaxis_title="",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                                bgcolor="rgba(0,0,0,0)"),
+                    margin=dict(l=180),
+                    xaxis=dict(tickformat=",.0f", tickprefix="R$ "),
+                )
+                st.plotly_chart(fig_turnover, use_container_width=True)
+
+            # Legend / explanation
+            st.caption(
+                "**Legenda:** "
+                "🔴 **Saída (Resgate)** = ativo sendo resgatado (dinheiro sai do fundo e volta para o caixa) · "
+                "🟢 **Entrada (Aplicação)** = dinheiro sendo aplicado no fundo · "
+                "🟤 **Passivo** = resgates de investidores (obrigação, reduz o PL) · "
+                f"**Turnover** = {turnover_pct:.1f}% do PL (soma de todas as movimentações / PL projetado)"
+            )
+
+            st.divider()
+
+            # ── Detalhamento do Plano ──
+            st.markdown("### 📋 Detalhamento do Plano")
+
             display_cols = ["Prioridade", "Ativo", "Operação", "Valor (R$)", "D+",
                             "Data Solicitação", "Data Liquidação", "Motivo"]
             fmt = {"Valor (R$)": "R$ {:,.0f}"}
@@ -2677,7 +2795,7 @@ elif page == "🎯 Carteira Modelo":
             # ── Seção 1: Cobertura de Passivos ──
             cobertura = plan_df[plan_df["Motivo"].str.contains("passivo", case=False, na=False)]
             if not cobertura.empty:
-                st.markdown("### 🎯 Cobertura de Passivos")
+                st.markdown("#### 🎯 Cobertura de Passivos")
                 st.caption("Resgates programados para que o dinheiro chegue a tempo de pagar os resgates de investidores.")
                 st.dataframe(
                     cobertura[display_cols].style.format(fmt),
@@ -2691,7 +2809,7 @@ elif page == "🎯 Carteira Modelo":
                 (~plan_df["Motivo"].str.contains("passivo", case=False, na=False))
             ]
             if not resgates_rebal.empty:
-                st.markdown("### 📤 Resgates (Rebalanceamento)")
+                st.markdown("#### 📤 Resgates (Rebalanceamento)")
                 st.caption("Resgates adicionais para ajustar a carteira ao modelo.")
                 st.dataframe(
                     resgates_rebal[display_cols].style.format(fmt),
@@ -2702,7 +2820,7 @@ elif page == "🎯 Carteira Modelo":
             # ── Seção 3: Aplicações ──
             aplicacoes = plan_df[plan_df["Operação"] == "Aplicação"]
             if not aplicacoes.empty:
-                st.markdown("### 📥 Aplicações")
+                st.markdown("#### 📥 Aplicações")
                 st.caption("Aplicações programadas para quando o caixa dos resgates estiver disponível.")
                 st.dataframe(
                     aplicacoes[display_cols].style.format(fmt),
