@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -46,12 +45,19 @@ TAG = {
 PLOTLY_LAYOUT = dict(
     paper_bgcolor="rgba(0,0,0,0)",
     plot_bgcolor="rgba(0,0,0,0)",
-    font=dict(family="Tahoma, sans-serif", color=TAG["offwhite"], size=12),
-    margin=dict(t=40, b=40, l=40, r=20),
-    xaxis=dict(gridcolor="rgba(230,228,219,0.08)", zerolinecolor="rgba(230,228,219,0.08)"),
-    yaxis=dict(gridcolor="rgba(230,228,219,0.08)", zerolinecolor="rgba(230,228,219,0.08)"),
-    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=11)),
+    font=dict(family="Inter, Tahoma, sans-serif", color=TAG["offwhite"], size=13),
+    margin=dict(t=30, b=50, l=50, r=20),
+    xaxis=dict(
+        gridcolor="rgba(230,228,219,0.10)", zerolinecolor="rgba(230,228,219,0.10)",
+        showline=True, linecolor="rgba(230,228,219,0.15)", linewidth=1,
+    ),
+    yaxis=dict(
+        gridcolor="rgba(230,228,219,0.10)", zerolinecolor="rgba(230,228,219,0.10)",
+        showline=True, linecolor="rgba(230,228,219,0.15)", linewidth=1,
+    ),
+    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=12)),
     colorway=TAG["chart"],
+    hoverlabel=dict(bgcolor=TAG["bg_panel"], font_size=12, font_color=TAG["offwhite"]),
 )
 
 # ─────────────────────────────────────────────────────────
@@ -1523,6 +1529,76 @@ def generate_smart_rebalancing_plan(
 # DISPLAY HELPERS
 # ─────────────────────────────────────────────────────────
 
+def build_cashflow_chart(df_timeline):
+    """Build a clean cash flow chart from a timeline DataFrame. Returns a plotly Figure."""
+    fig = go.Figure()
+
+    # Main line: saldo over time
+    fig.add_trace(go.Scatter(
+        x=df_timeline["Data"], y=df_timeline["Saldo (R$)"],
+        mode="lines", name="Saldo",
+        line=dict(color=TAG["chart"][2], width=2.5),
+        hovertemplate="<b>%{x|%d/%m/%Y}</b><br>Saldo: R$ %{y:,.0f}<extra></extra>",
+    ))
+
+    # Fill green above zero, red below
+    fig.add_trace(go.Scatter(
+        x=df_timeline["Data"], y=df_timeline["Saldo (R$)"].clip(lower=0),
+        fill="tozeroy", mode="none", name="Positivo",
+        fillcolor="rgba(107,222,151,0.10)", showlegend=False,
+    ))
+    neg_vals = df_timeline["Saldo (R$)"].clip(upper=0)
+    if (neg_vals < 0).any():
+        fig.add_trace(go.Scatter(
+            x=df_timeline["Data"], y=neg_vals,
+            fill="tozeroy", mode="none", name="Negativo",
+            fillcolor="rgba(237,90,110,0.15)", showlegend=False,
+        ))
+        # X markers on negative days
+        neg_days = df_timeline[df_timeline["Saldo (R$)"] < 0]
+        fig.add_trace(go.Scatter(
+            x=neg_days["Data"], y=neg_days["Saldo (R$)"],
+            mode="markers", name="Déficit",
+            marker=dict(size=9, color=TAG["chart"][4], symbol="x", line=dict(width=1.5)),
+            hovertemplate="<b>DÉFICIT</b><br>%{x|%d/%m/%Y}<br>R$ %{y:,.0f}<extra></extra>",
+        ))
+
+    # Event day markers (entradas / saídas)
+    event_days = df_timeline[df_timeline["Tem Evento"]]
+    if not event_days.empty:
+        ent = event_days[event_days["Entradas (R$)"] > 0]
+        sai = event_days[event_days["Saídas (R$)"] > 0]
+        if not ent.empty:
+            fig.add_trace(go.Scatter(
+                x=ent["Data"], y=ent["Saldo (R$)"],
+                mode="markers", name="Entrada",
+                marker=dict(size=8, color=TAG["chart"][2], symbol="triangle-up"),
+                hovertemplate="<b>Entrada</b><br>%{x|%d/%m/%Y}<br>+R$ " +
+                    ent["Entradas (R$)"].apply(lambda v: f"{v:,.0f}").values +
+                    "<extra></extra>",
+            ))
+        if not sai.empty:
+            fig.add_trace(go.Scatter(
+                x=sai["Data"], y=sai["Saldo (R$)"],
+                mode="markers", name="Saída",
+                marker=dict(size=8, color=TAG["chart"][4], symbol="triangle-down"),
+                hovertemplate="<b>Saída</b><br>%{x|%d/%m/%Y}<br>-R$ " +
+                    sai["Saídas (R$)"].apply(lambda v: f"{v:,.0f}").values +
+                    "<extra></extra>",
+            ))
+
+    # Zero reference line
+    fig.add_hline(y=0, line_dash="dot", line_color="rgba(230,228,219,0.3)", line_width=1)
+
+    fig.update_layout(**PLOTLY_LAYOUT, height=380)
+    fig.update_layout(
+        xaxis_title="", yaxis_title="Saldo (R$)",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                    bgcolor="rgba(0,0,0,0)", font=dict(size=11)),
+    )
+    return fig
+
+
 def display_provisions_summary(movements, expanded=False):
     """Display a categorized view of provisions/movements."""
     if not movements:
@@ -2001,11 +2077,15 @@ if page == "📂 Importar Dados":
 
             # ── Gráfico ──
             if not model_df.empty:
-                fig = px.pie(model_df, values="% Alvo", names="Ativo", hole=0.45,
-                             color_discrete_sequence=TAG["chart"])
-                fig.update_traces(textposition="inside", textinfo="percent+label",
-                                  textfont_size=10, marker=dict(line=dict(color=TAG["bg_dark"], width=2)))
-                fig.update_layout(**PLOTLY_LAYOUT, height=300, showlegend=False)
+                fig = go.Figure(go.Pie(
+                    labels=model_df["Ativo"], values=model_df["% Alvo"],
+                    hole=0.5, textinfo="label+percent", textposition="outside",
+                    textfont=dict(size=11, color=TAG["offwhite"]),
+                    marker=dict(colors=TAG["chart"], line=dict(color=TAG["bg_dark"], width=1.5)),
+                    hovertemplate="<b>%{label}</b><br>%{value:.1f}%<extra></extra>",
+                ))
+                fig.update_layout(**PLOTLY_LAYOUT, height=350, showlegend=False)
+                fig.update_layout(margin=dict(t=20, b=20, l=20, r=20))
                 st.plotly_chart(fig, use_container_width=True)
 
 
@@ -2057,21 +2137,39 @@ elif page == "📋 Posição Atual":
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("Alocação por Ativo")
-            fig = px.pie(ativos, values="FINANCEIRO", names="ATIVO", hole=0.45,
-                         color_discrete_sequence=TAG["chart"])
-            fig.update_traces(textposition="inside", textinfo="percent+label",
-                              textfont_size=11, marker=dict(line=dict(color=TAG["bg_dark"], width=2)))
-            fig.update_layout(**PLOTLY_LAYOUT, height=400, showlegend=False)
+            top_n = ativos.nlargest(10, "FINANCEIRO")
+            others = ativos[~ativos.index.isin(top_n.index)]
+            if not others.empty:
+                others_row = pd.DataFrame([{"ATIVO": "Outros", "FINANCEIRO": others["FINANCEIRO"].sum()}])
+                pie_data = pd.concat([top_n[["ATIVO", "FINANCEIRO"]], others_row], ignore_index=True)
+            else:
+                pie_data = top_n[["ATIVO", "FINANCEIRO"]].copy()
+            fig = go.Figure(go.Pie(
+                labels=pie_data["ATIVO"], values=pie_data["FINANCEIRO"],
+                hole=0.5, textinfo="label+percent", textposition="outside",
+                textfont=dict(size=11, color=TAG["offwhite"]),
+                marker=dict(colors=TAG["chart"], line=dict(color=TAG["bg_dark"], width=1.5)),
+                hovertemplate="<b>%{label}</b><br>R$ %{value:,.0f}<br>%{percent}<extra></extra>",
+                pull=[0.02] * len(pie_data),
+            ))
+            fig.update_layout(**PLOTLY_LAYOUT, height=420, showlegend=False)
+            fig.update_layout(margin=dict(t=20, b=20, l=20, r=20))
             st.plotly_chart(fig, use_container_width=True)
         with col2:
             strat_col = find_col(ativos, "ESTRATÉGIA", "ESTRATEGIA")
             if strat_col and strat_col in ativos.columns:
                 st.subheader("Alocação por Estratégia")
-                strat = ativos.groupby(strat_col)["FINANCEIRO"].sum().reset_index()
-                fig2 = px.bar(strat, x=strat_col, y="FINANCEIRO", text_auto=",.0f",
-                              color_discrete_sequence=[TAG["laranja"]])
-                fig2.update_layout(**PLOTLY_LAYOUT, xaxis_tickangle=-45, height=400)
-                fig2.update_traces(marker_line_width=0, textfont_color=TAG["offwhite"])
+                strat = ativos.groupby(strat_col)["FINANCEIRO"].sum().reset_index().sort_values("FINANCEIRO", ascending=True)
+                fig2 = go.Figure(go.Bar(
+                    y=strat[strat_col], x=strat["FINANCEIRO"],
+                    orientation="h",
+                    marker_color=TAG["laranja"], marker_line_width=0,
+                    text=strat["FINANCEIRO"].apply(lambda v: f"R$ {v:,.0f}"),
+                    textposition="auto", textfont=dict(color=TAG["offwhite"], size=11),
+                    hovertemplate="<b>%{y}</b><br>R$ %{x:,.0f}<extra></extra>",
+                ))
+                fig2.update_layout(**PLOTLY_LAYOUT, height=420)
+                fig2.update_layout(xaxis_title="Financeiro (R$)", yaxis_title="", margin=dict(l=140))
                 st.plotly_chart(fig2, use_container_width=True)
 
         # Provisões
@@ -2170,43 +2268,89 @@ elif page == "📊 Projeção da Carteira":
                 last_date_col = date_cols[-1] if date_cols else None
                 if last_date_col:
                     chart_df = df_pct[~df_pct["Ativo"].isin(["📊 TOTAL PL"])].copy()
+                    chart_df = chart_df.sort_values("Atual (%)", ascending=True)
                     fig = go.Figure()
-                    fig.add_trace(go.Bar(name="Hoje", x=chart_df["Ativo"], y=chart_df["Atual (%)"],
-                                         marker_color=TAG["chart"][1], marker_line_width=0))
-                    fig.add_trace(go.Bar(name=last_date_col, x=chart_df["Ativo"], y=chart_df[last_date_col],
-                                         marker_color=TAG["laranja"], marker_line_width=0))
-                    fig.update_layout(**PLOTLY_LAYOUT, barmode="group", height=400,
-                                      xaxis_tickangle=-30, yaxis_title="% PL")
+                    fig.add_trace(go.Bar(
+                        name="Hoje", y=chart_df["Ativo"], x=chart_df["Atual (%)"],
+                        orientation="h", marker_color=TAG["chart"][1], marker_line_width=0,
+                        text=chart_df["Atual (%)"].apply(lambda v: f"{v:.1f}%"),
+                        textposition="auto", textfont=dict(size=11, color=TAG["offwhite"]),
+                    ))
+                    fig.add_trace(go.Bar(
+                        name=last_date_col, y=chart_df["Ativo"], x=chart_df[last_date_col],
+                        orientation="h", marker_color=TAG["laranja"], marker_line_width=0,
+                        text=chart_df[last_date_col].apply(lambda v: f"{v:.1f}%"),
+                        textposition="auto", textfont=dict(size=11, color=TAG["offwhite"]),
+                    ))
+                    fig.update_layout(**PLOTLY_LAYOUT, barmode="group",
+                                      height=max(350, len(chart_df) * 40 + 80))
+                    fig.update_layout(
+                        xaxis_title="% PL", yaxis_title="",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                                    bgcolor="rgba(0,0,0,0)"),
+                        margin=dict(l=160),
+                    )
                     st.plotly_chart(fig, use_container_width=True)
 
                 # Timeline
                 st.subheader("Timeline de Liquidação")
                 timeline_data = df_mov[df_mov["Data Liquidação"] != ""].copy()
                 if not timeline_data.empty:
-                    timeline_data["Data Solicitação"] = pd.to_datetime(timeline_data["Data Solicitação"], dayfirst=True)
-                    timeline_data["Data Liquidação"] = pd.to_datetime(timeline_data["Data Liquidação"], dayfirst=True)
-                    timeline_data.loc[
-                        timeline_data["Data Solicitação"] == timeline_data["Data Liquidação"],
-                        "Data Liquidação"
-                    ] += timedelta(days=1)
-                    timeline_data["Label"] = (
-                        timeline_data["Operação"].str[:10] + " | " +
-                        timeline_data["Fundo"].str[:25] +
-                        " (R$ " + timeline_data["Valor (R$)"].apply(lambda x: f"{x:,.0f}") + ")"
+                    timeline_data["Data Liquidação DT"] = pd.to_datetime(timeline_data["Data Liquidação"], dayfirst=True)
+
+                    op_colors = {
+                        "Resgate (Cotizando)": TAG["chart"][4],
+                        "Resgate Passivo": TAG["laranja"],
+                        "Débito/Passivo": TAG["chart"][6],
+                        "Crédito (Provisão)": TAG["chart"][5],
+                        "Resgate": TAG["vermelho_light"],
+                        "Aplicação": TAG["chart"][2],
+                    }
+
+                    # Group by liquidation date and show as vertical markers
+                    tl_grouped = timeline_data.groupby("Data Liquidação DT").agg(
+                        total=("Valor (R$)", "sum"),
+                        count=("Fundo", "count"),
+                        ops=("Operação", lambda x: ", ".join(x.unique())),
+                        details=("Fundo", lambda x: "<br>".join(
+                            f"• {f[:30]}" for f in x
+                        )),
+                    ).reset_index().sort_values("Data Liquidação DT")
+
+                    fig_tl = go.Figure()
+
+                    # Lollipop chart: stem + circle for each date
+                    for _, grp in tl_grouped.iterrows():
+                        main_op = grp["ops"].split(",")[0].strip()
+                        color = op_colors.get(main_op, TAG["chart"][0])
+                        fig_tl.add_trace(go.Scatter(
+                            x=[grp["Data Liquidação DT"], grp["Data Liquidação DT"]],
+                            y=[0, grp["total"]],
+                            mode="lines", line=dict(color=color, width=2),
+                            showlegend=False, hoverinfo="skip",
+                        ))
+                        fig_tl.add_trace(go.Scatter(
+                            x=[grp["Data Liquidação DT"]],
+                            y=[grp["total"]],
+                            mode="markers+text",
+                            marker=dict(size=14, color=color, line=dict(color=TAG["bg_dark"], width=1.5)),
+                            text=[f"R$ {grp['total']:,.0f}"],
+                            textposition="top center",
+                            textfont=dict(size=10, color=TAG["offwhite"]),
+                            showlegend=False,
+                            hovertemplate=(
+                                f"<b>{grp['Data Liquidação DT'].strftime('%d/%m/%Y')}</b><br>"
+                                f"{grp['count']} movimento(s)<br>"
+                                f"Total: R$ {grp['total']:,.0f}<br>"
+                                f"{grp['details']}<extra></extra>"
+                            ),
+                        ))
+
+                    fig_tl.update_layout(**PLOTLY_LAYOUT, height=350)
+                    fig_tl.update_layout(
+                        xaxis_title="Data de Liquidação", yaxis_title="Valor (R$)",
+                        showlegend=False,
                     )
-                    fig_tl = px.timeline(
-                        timeline_data, x_start="Data Solicitação", x_end="Data Liquidação",
-                        y="Label", color="Operação",
-                        color_discrete_map={
-                            "Resgate (Cotizando)": TAG["chart"][4],  # ED5A6E
-                            "Resgate Passivo": TAG["laranja"],
-                            "Débito/Passivo": TAG["chart"][6],  # A485F2
-                            "Crédito (Provisão)": TAG["chart"][5],  # 58C6F5
-                            "Resgate": TAG["vermelho_light"],
-                            "Aplicação": TAG["chart"][2],  # 6BDE97
-                        },
-                    )
-                    fig_tl.update_layout(**PLOTLY_LAYOUT, height=max(300, len(timeline_data) * 40), yaxis_title="")
                     st.plotly_chart(fig_tl, use_container_width=True)
 
                 # ── CASH FLOW TIMELINE ──
@@ -2261,59 +2405,7 @@ elif page == "📊 Projeção da Carteira":
 
                 # D. Chart
                 if not df_timeline.empty:
-                    fig_cf = go.Figure()
-
-                    # Running balance area
-                    pos_mask = df_timeline["Saldo (R$)"] >= 0
-                    neg_mask = df_timeline["Saldo (R$)"] < 0
-
-                    fig_cf.add_trace(go.Scatter(
-                        x=df_timeline["Data"], y=df_timeline["Saldo (R$)"],
-                        fill="tozeroy", mode="lines+markers",
-                        name="Saldo Caixa",
-                        line=dict(color=TAG["chart"][2], width=2),
-                        fillcolor="rgba(107,222,151,0.12)",
-                        marker=dict(size=4),
-                    ))
-
-                    # Highlight negative areas
-                    if neg_mask.any():
-                        neg_data = df_timeline[neg_mask]
-                        fig_cf.add_trace(go.Scatter(
-                            x=neg_data["Data"], y=neg_data["Saldo (R$)"],
-                            fill="tozeroy", mode="markers",
-                            name="Déficit",
-                            line=dict(color=TAG["chart"][4]),
-                            fillcolor="rgba(237,90,110,0.25)",
-                            marker=dict(size=8, color=TAG["chart"][4], symbol="x"),
-                        ))
-
-                    # Inflow/outflow bars (only on event days)
-                    event_days = df_timeline[df_timeline["Tem Evento"]]
-                    if not event_days.empty:
-                        fig_cf.add_trace(go.Bar(
-                            x=event_days["Data"], y=event_days["Entradas (R$)"],
-                            name="Entradas", marker_color=TAG["chart"][2], opacity=0.5,
-                        ))
-                        fig_cf.add_trace(go.Bar(
-                            x=event_days["Data"], y=-event_days["Saídas (R$)"],
-                            name="Saídas", marker_color=TAG["chart"][4], opacity=0.5,
-                        ))
-
-                    # Zero line
-                    fig_cf.add_hline(
-                        y=0, line_dash="dash", line_color=TAG["chart"][4],
-                        line_width=2,
-                        annotation_text="Zero — Limite Mínimo",
-                        annotation_position="top right",
-                        annotation_font_color=TAG["chart"][4],
-                    )
-
-                    fig_cf.update_layout(
-                        **PLOTLY_LAYOUT, height=450, barmode="overlay",
-                        yaxis_title="R$", xaxis_title="Data",
-                    )
-                    fig_cf.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                    fig_cf = build_cashflow_chart(df_timeline)
                     st.plotly_chart(fig_cf, use_container_width=True)
 
                 # E. Suggestions table
@@ -2446,17 +2538,32 @@ elif page == "🎯 Carteira Modelo":
             use_container_width=True, hide_index=True, height=450,
         )
 
-        # Gap chart
+        # Gap chart — horizontal bars side by side
         chart_data = adherence_df[adherence_df["Código"] != "CAIXA"].copy()
+        chart_data = chart_data.sort_values("% Atual (Pós-Mov.)", ascending=True)
+
         fig_gap = go.Figure()
-        fig_gap.add_trace(go.Bar(name="% Atual", x=chart_data["Ativo"],
-                                  y=chart_data["% Atual (Pós-Mov.)"],
-                                  marker_color=TAG["chart"][1], marker_line_width=0))
-        fig_gap.add_trace(go.Bar(name="% Modelo", x=chart_data["Ativo"],
-                                  y=chart_data["% Alvo (Modelo)"],
-                                  marker_color=TAG["laranja"], marker_line_width=0))
-        fig_gap.update_layout(**PLOTLY_LAYOUT, barmode="group", height=400,
-                              xaxis_tickangle=-30, yaxis_title="% PL")
+        fig_gap.add_trace(go.Bar(
+            name="% Atual", y=chart_data["Ativo"], x=chart_data["% Atual (Pós-Mov.)"],
+            orientation="h", marker_color=TAG["chart"][1], marker_line_width=0,
+            text=chart_data["% Atual (Pós-Mov.)"].apply(lambda v: f"{v:.1f}%"),
+            textposition="auto", textfont=dict(size=11, color=TAG["offwhite"]),
+            hovertemplate="<b>%{y}</b><br>Atual: %{x:.2f}%<extra></extra>",
+        ))
+        fig_gap.add_trace(go.Bar(
+            name="% Modelo", y=chart_data["Ativo"], x=chart_data["% Alvo (Modelo)"],
+            orientation="h", marker_color=TAG["laranja"], marker_line_width=0,
+            text=chart_data["% Alvo (Modelo)"].apply(lambda v: f"{v:.1f}%"),
+            textposition="auto", textfont=dict(size=11, color=TAG["offwhite"]),
+            hovertemplate="<b>%{y}</b><br>Modelo: %{x:.2f}%<extra></extra>",
+        ))
+        fig_gap.update_layout(**PLOTLY_LAYOUT, barmode="group", height=max(350, len(chart_data) * 40 + 80))
+        fig_gap.update_layout(
+            xaxis_title="% PL", yaxis_title="",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                        bgcolor="rgba(0,0,0,0)"),
+            margin=dict(l=160),
+        )
         st.plotly_chart(fig_gap, use_container_width=True)
 
         st.divider()
@@ -2527,9 +2634,8 @@ elif page == "🎯 Carteira Modelo":
             if cobertura.empty and resgates_rebal.empty and aplicacoes.empty:
                 st.info("Nenhum movimento necessário.")
 
-            # ── Timeline Visual ──
+            # ── Cronograma Visual ──
             st.markdown("### 📅 Cronograma de Liquidações")
-            st.caption("Cada linha mostra quando solicitar e quando o dinheiro liquida. Linhas vermelhas tracejadas = prazo dos passivos.")
 
             try:
                 # Collect passivo dates
@@ -2540,106 +2646,66 @@ elif page == "🎯 Carteira Modelo":
                         if ld >= pd.Timestamp(plan_date):
                             passivo_dates[ld] = passivo_dates.get(ld, 0) + m["value"]
 
-                fig_tl = go.Figure()
-
-                # One horizontal arrow per movement: solicitação → liquidação
-                y_labels = []
-                for idx, (_, row) in enumerate(plan_df.iterrows()):
-                    req = pd.to_datetime(row["Data Solicitação"], dayfirst=True)
+                # Aggregate plan by liquidation date
+                plan_by_date = {}
+                for _, row in plan_df.iterrows():
                     liq = pd.to_datetime(row["Data Liquidação"], dayfirst=True)
                     is_resgate = row["Operação"] == "Resgate"
-                    color = TAG["vermelho"] if is_resgate else TAG["chart"][2]
-                    y_val = len(plan_df) - idx  # top to bottom
-                    short_name = row["Ativo"][:22]
-                    y_labels.append((y_val, short_name))
-
-                    # Connecting line (solicitação → liquidação)
-                    fig_tl.add_trace(go.Scatter(
-                        x=[req, liq], y=[y_val, y_val],
-                        mode="lines",
-                        line=dict(color=color, width=3),
-                        showlegend=False, hoverinfo="skip",
-                    ))
-
-                    # Solicitação marker (circle)
-                    fig_tl.add_trace(go.Scatter(
-                        x=[req], y=[y_val],
-                        mode="markers+text",
-                        marker=dict(size=10, color=TAG["bg_dark"], line=dict(color=color, width=2)),
-                        text=[f"Solic. {req.strftime('%d/%m')}"],
-                        textposition="bottom center",
-                        textfont=dict(size=9, color=TAG["offwhite"]),
-                        showlegend=False,
-                        hovertemplate=(
-                            f"<b>Solicitação</b><br>{short_name}<br>"
-                            f"{row['Operação']}: R$ {row['Valor (R$)']:,.0f}<br>"
-                            f"Data: {row['Data Solicitação']}<extra></extra>"
-                        ),
-                    ))
-
-                    # Liquidação marker (filled)
-                    symbol = "triangle-right" if is_resgate else "diamond"
-                    fig_tl.add_trace(go.Scatter(
-                        x=[liq], y=[y_val],
-                        mode="markers+text",
-                        marker=dict(size=12, color=color, symbol=symbol),
-                        text=[f"R$ {row['Valor (R$)']:,.0f}"],
-                        textposition="top center",
-                        textfont=dict(size=10, color=color, family="Inter"),
-                        showlegend=False,
-                        hovertemplate=(
-                            f"<b>Liquidação</b><br>{short_name}<br>"
-                            f"{row['Operação']}: R$ {row['Valor (R$)']:,.0f}<br>"
-                            f"Data: {row['Data Liquidação']}<br>"
-                            f"D+: {row['D+']}<br>"
-                            f"Motivo: {row['Motivo']}<extra></extra>"
-                        ),
-                    ))
-
-                # Vertical dashed lines for passivo deadlines
-                for pd_date, pd_val in passivo_dates.items():
-                    fig_tl.add_vline(
-                        x=pd_date, line_dash="dash", line_color=TAG["vermelho"],
-                        line_width=2, opacity=0.8,
-                    )
-                    fig_tl.add_annotation(
-                        x=pd_date, y=len(plan_df) + 0.7,
-                        text=f"Passivo {pd_date.strftime('%d/%m')}<br>R$ {pd_val:,.0f}",
-                        showarrow=False, font=dict(size=10, color=TAG["vermelho"]),
-                        bgcolor=TAG["bg_dark"], bordercolor=TAG["vermelho"], borderwidth=1,
-                        borderpad=3,
+                    if liq not in plan_by_date:
+                        plan_by_date[liq] = {"resgates": 0, "aplicacoes": 0, "items": []}
+                    if is_resgate:
+                        plan_by_date[liq]["resgates"] += row["Valor (R$)"]
+                    else:
+                        plan_by_date[liq]["aplicacoes"] += row["Valor (R$)"]
+                    plan_by_date[liq]["items"].append(
+                        f"{row['Operação']}: {row['Ativo'][:25]} — R$ {row['Valor (R$)']:,.0f}"
                     )
 
-                # Y-axis with fund names
-                fig_tl.update_layout(**PLOTLY_LAYOUT, height=max(350, len(plan_df) * 55 + 120))
-                fig_tl.update_layout(
-                    xaxis=dict(title="Data", type="date", gridcolor=f"{TAG['offwhite']}15"),
-                    yaxis=dict(
-                        tickvals=[yl[0] for yl in y_labels],
-                        ticktext=[yl[1] for yl in y_labels],
-                        title="",
-                    ),
-                    margin=dict(l=160),
-                )
+                all_dates = sorted(set(list(plan_by_date.keys()) + list(passivo_dates.keys())))
 
-                # Legend manual via annotations
-                c_res = TAG["vermelho"]
-                c_apl = TAG["chart"][2]
-                legend_txt = (
-                    f"<span style='color:{c_res}'>▶ Resgate</span>"
-                    f"  &nbsp;  "
-                    f"<span style='color:{c_apl}'>◆ Aplicação</span>"
-                    f"  &nbsp;  "
-                    f"<span style='color:{c_res}'>┆ Prazo Passivo</span>"
-                    f"  &nbsp;  ○ Solicitação  →  Liquidação"
-                )
-                fig_tl.add_annotation(
-                    x=0.01, y=-0.12, xref="paper", yref="paper",
-                    text=legend_txt,
-                    showarrow=False, font=dict(size=11, color=TAG["offwhite"]),
-                )
+                if all_dates:
+                    fig_crono = go.Figure()
 
-                st.plotly_chart(fig_tl, use_container_width=True)
+                    # Resgates arriving (positive bars)
+                    res_vals = [plan_by_date.get(d, {}).get("resgates", 0) for d in all_dates]
+                    fig_crono.add_trace(go.Bar(
+                        x=all_dates, y=res_vals, name="Resgates (entrada)",
+                        marker_color=TAG["chart"][2], marker_line_width=0,
+                        text=[f"R$ {v:,.0f}" if v > 0 else "" for v in res_vals],
+                        textposition="outside", textfont=dict(size=10, color=TAG["offwhite"]),
+                        hovertemplate="<b>%{x|%d/%m/%Y}</b><br>Resgates: R$ %{y:,.0f}<extra></extra>",
+                    ))
+
+                    # Aplicações leaving (negative bars)
+                    apl_vals = [-plan_by_date.get(d, {}).get("aplicacoes", 0) for d in all_dates]
+                    fig_crono.add_trace(go.Bar(
+                        x=all_dates, y=apl_vals, name="Aplicações (saída)",
+                        marker_color=TAG["chart"][1], marker_line_width=0,
+                        text=[f"R$ {abs(v):,.0f}" if v < 0 else "" for v in apl_vals],
+                        textposition="outside", textfont=dict(size=10, color=TAG["offwhite"]),
+                        hovertemplate="<b>%{x|%d/%m/%Y}</b><br>Aplicações: R$ %{y:,.0f}<extra></extra>",
+                    ))
+
+                    # Passivo markers (negative, distinct color)
+                    pas_vals = [-passivo_dates.get(d, 0) for d in all_dates]
+                    if any(v < 0 for v in pas_vals):
+                        fig_crono.add_trace(go.Bar(
+                            x=all_dates, y=pas_vals, name="Passivos (obrigação)",
+                            marker_color=TAG["vermelho"], marker_line_width=0,
+                            text=[f"R$ {abs(v):,.0f}" if v < 0 else "" for v in pas_vals],
+                            textposition="outside", textfont=dict(size=10, color=TAG["vermelho"]),
+                            hovertemplate="<b>%{x|%d/%m/%Y}</b><br>Passivo: R$ %{y:,.0f}<extra></extra>",
+                        ))
+
+                    fig_crono.add_hline(y=0, line_dash="dot", line_color="rgba(230,228,219,0.3)", line_width=1)
+
+                    fig_crono.update_layout(**PLOTLY_LAYOUT, height=380, barmode="relative")
+                    fig_crono.update_layout(
+                        xaxis_title="Data de Liquidação", yaxis_title="Valor (R$)",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                                    bgcolor="rgba(0,0,0,0)"),
+                    )
+                    st.plotly_chart(fig_crono, use_container_width=True)
             except Exception:
                 pass  # Non-critical visualization
 
@@ -2668,13 +2734,28 @@ elif page == "🎯 Carteira Modelo":
                     df_evo_pct_display = df_evo_pct.drop(columns=["Código"]).copy()
                     df_evo_pct_display["🎯 Modelo"] = df_evo_pct_display["Ativo"].map(model_map).fillna(0)
                     cmp = df_evo_pct_display[~df_evo_pct_display["Ativo"].isin(["📊 TOTAL PL"])].copy()
+                    cmp = cmp.sort_values(last_dc, ascending=True)
                     fig_cmp = go.Figure()
-                    fig_cmp.add_trace(go.Bar(name=f"Projeção {last_dc}", x=cmp["Ativo"], y=cmp[last_dc],
-                                              marker_color=TAG["chart"][1], marker_line_width=0))
-                    fig_cmp.add_trace(go.Bar(name="🎯 Modelo", x=cmp["Ativo"], y=cmp["🎯 Modelo"],
-                                              marker_color=TAG["laranja"], marker_line_width=0))
-                    fig_cmp.update_layout(**PLOTLY_LAYOUT, barmode="group", height=400,
-                                          xaxis_tickangle=-30, yaxis_title="% PL")
+                    fig_cmp.add_trace(go.Bar(
+                        name=f"Projeção {last_dc}", y=cmp["Ativo"], x=cmp[last_dc],
+                        orientation="h", marker_color=TAG["chart"][1], marker_line_width=0,
+                        text=cmp[last_dc].apply(lambda v: f"{v:.1f}%"),
+                        textposition="auto", textfont=dict(size=11, color=TAG["offwhite"]),
+                    ))
+                    fig_cmp.add_trace(go.Bar(
+                        name="Modelo", y=cmp["Ativo"], x=cmp["🎯 Modelo"],
+                        orientation="h", marker_color=TAG["laranja"], marker_line_width=0,
+                        text=cmp["🎯 Modelo"].apply(lambda v: f"{v:.1f}%"),
+                        textposition="auto", textfont=dict(size=11, color=TAG["offwhite"]),
+                    ))
+                    fig_cmp.update_layout(**PLOTLY_LAYOUT, barmode="group",
+                                          height=max(350, len(cmp) * 40 + 80))
+                    fig_cmp.update_layout(
+                        xaxis_title="% PL", yaxis_title="",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                                    bgcolor="rgba(0,0,0,0)"),
+                        margin=dict(l=160),
+                    )
                     st.plotly_chart(fig_cmp, use_container_width=True)
 
             # ── CASH FLOW for combined movements ──
@@ -2706,41 +2787,7 @@ elif page == "🎯 Carteira Modelo":
                     st.success("Plano viável! Caixa positivo em todas as datas.")
 
             if not tl_plan.empty:
-                fig_plan = go.Figure()
-                fig_plan.add_trace(go.Scatter(
-                    x=tl_plan["Data"], y=tl_plan["Saldo (R$)"],
-                    fill="tozeroy", mode="lines+markers",
-                    name="Saldo Caixa",
-                    line=dict(color=TAG["chart"][2], width=2),
-                    fillcolor="rgba(107,222,151,0.12)",
-                    marker=dict(size=4),
-                ))
-                neg_m = tl_plan["Saldo (R$)"] < 0
-                if neg_m.any():
-                    fig_plan.add_trace(go.Scatter(
-                        x=tl_plan.loc[neg_m, "Data"], y=tl_plan.loc[neg_m, "Saldo (R$)"],
-                        fill="tozeroy", mode="markers",
-                        name="Déficit",
-                        line=dict(color=TAG["chart"][4]),
-                        fillcolor="rgba(237,90,110,0.25)",
-                        marker=dict(size=8, color=TAG["chart"][4], symbol="x"),
-                    ))
-                event_d = tl_plan[tl_plan["Tem Evento"]]
-                if not event_d.empty:
-                    fig_plan.add_trace(go.Bar(
-                        x=event_d["Data"], y=event_d["Entradas (R$)"],
-                        name="Entradas", marker_color=TAG["chart"][2], opacity=0.5,
-                    ))
-                    fig_plan.add_trace(go.Bar(
-                        x=event_d["Data"], y=-event_d["Saídas (R$)"],
-                        name="Saídas", marker_color=TAG["chart"][4], opacity=0.5,
-                    ))
-                fig_plan.add_hline(y=0, line_dash="dash", line_color=TAG["chart"][4], line_width=2)
-                fig_plan.update_layout(
-                    **PLOTLY_LAYOUT, height=400, barmode="overlay",
-                    yaxis_title="R$", xaxis_title="Data",
-                )
-                fig_plan.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                fig_plan = build_cashflow_chart(tl_plan)
                 st.plotly_chart(fig_plan, use_container_width=True)
 
             if sug_plan:
@@ -2817,12 +2864,20 @@ elif page == "📅 Dados de Liquidação":
     st.subheader("Estatísticas de Liquidação")
     col1, col2 = st.columns(2)
     with col1:
-        fig = px.histogram(liquid_df, x="Conversão Resgate", nbins=30, title="D+ Conversão Resgate",
-                           color_discrete_sequence=[TAG["laranja"]])
+        fig = go.Figure(go.Histogram(
+            x=liquid_df["Conversão Resgate"], nbinsx=30,
+            marker_color=TAG["laranja"], marker_line_width=0,
+            hovertemplate="D+%{x}<br>%{y} fundos<extra></extra>",
+        ))
         fig.update_layout(**PLOTLY_LAYOUT, height=350)
+        fig.update_layout(xaxis_title="D+ Conversão Resgate", yaxis_title="Qtd Fundos")
         st.plotly_chart(fig, use_container_width=True)
     with col2:
-        fig2 = px.histogram(liquid_df, x="Liquid. Resgate", nbins=30, title="D+ Liquidação Resgate",
-                            color_discrete_sequence=[TAG["chart"][1]])
+        fig2 = go.Figure(go.Histogram(
+            x=liquid_df["Liquid. Resgate"], nbinsx=30,
+            marker_color=TAG["chart"][1], marker_line_width=0,
+            hovertemplate="D+%{x}<br>%{y} fundos<extra></extra>",
+        ))
         fig2.update_layout(**PLOTLY_LAYOUT, height=350)
+        fig2.update_layout(xaxis_title="D+ Liquidação Resgate", yaxis_title="Qtd Fundos")
         st.plotly_chart(fig2, use_container_width=True)
