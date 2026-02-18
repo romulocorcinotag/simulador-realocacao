@@ -2929,78 +2929,160 @@ total nao muda (a operacao e **neutra**). Por isso o grafico mostra cada compone
             if cobertura.empty and resgates_rebal.empty and aplicacoes.empty:
                 st.info("Nenhum movimento necessário.")
 
-            # ── Cronograma Visual ──
-            st.markdown("### 📅 Cronograma de Liquidações")
+            # ── Cronograma Visual por Ativo (Gantt) ──
+            st.markdown("### 📅 Cronograma de Liquidações por Ativo")
+            st.caption(
+                "Cada barra mostra o periodo entre a data de solicitacao e a data de liquidacao de cada operacao. "
+                "Passe o mouse para ver os detalhes."
+            )
 
             try:
-                # Collect passivo dates
-                passivo_dates = {}
+                today_ts = pd.Timestamp(plan_date)
+
+                # Build per-asset timeline rows
+                gantt_rows = []
+
+                # 1. Passivos (obrigações de investidores)
                 for m in all_movements:
                     if m["operation"] == "Resgate Passivo" and pd.notna(m.get("liquidation_date")):
                         ld = pd.Timestamp(m["liquidation_date"])
-                        if ld >= pd.Timestamp(plan_date):
-                            passivo_dates[ld] = passivo_dates.get(ld, 0) + m["value"]
+                        if ld >= today_ts:
+                            gantt_rows.append({
+                                "Ativo": "PASSIVO (Investidores)",
+                                "Operação": "Passivo",
+                                "Início": today_ts,
+                                "Fim": ld,
+                                "Valor": m["value"],
+                                "D+": "",
+                                "color": TAG["vermelho"],
+                            })
 
-                # Aggregate plan by liquidation date
-                plan_by_date = {}
+                # 2. Cotizando (resgates em trânsito)
+                for m in all_movements:
+                    if m["operation"] in ("Resgate (Cotizando)", "Resgate (Provisão)") and pd.notna(m.get("liquidation_date")):
+                        ld = pd.Timestamp(m["liquidation_date"])
+                        rd = pd.Timestamp(m.get("request_date", today_ts))
+                        fund_name = m.get("fund_name", "")[:30]
+                        if ld >= today_ts:
+                            gantt_rows.append({
+                                "Ativo": fund_name,
+                                "Operação": "Cotizando",
+                                "Início": rd if rd >= today_ts else today_ts,
+                                "Fim": ld,
+                                "Valor": m["value"],
+                                "D+": "",
+                                "color": TAG["chart"][5],
+                            })
+
+                # 3. Plan movements (resgates e aplicações)
                 for _, row in plan_df.iterrows():
+                    sol = pd.to_datetime(row["Data Solicitação"], dayfirst=True)
                     liq = pd.to_datetime(row["Data Liquidação"], dayfirst=True)
-                    is_resgate = row["Operação"] == "Resgate"
-                    if liq not in plan_by_date:
-                        plan_by_date[liq] = {"resgates": 0, "aplicacoes": 0, "items": []}
-                    if is_resgate:
-                        plan_by_date[liq]["resgates"] += row["Valor (R$)"]
+                    op = row["Operação"]
+                    ativo = str(row["Ativo"])[:30]
+                    if op == "Resgate":
+                        color = TAG["chart"][4]  # rosa/vermelho
                     else:
-                        plan_by_date[liq]["aplicacoes"] += row["Valor (R$)"]
-                    plan_by_date[liq]["items"].append(
-                        f"{row['Operação']}: {row['Ativo'][:25]} — R$ {row['Valor (R$)']:,.0f}"
+                        color = TAG["chart"][2]  # verde
+                    gantt_rows.append({
+                        "Ativo": ativo,
+                        "Operação": op,
+                        "Início": sol,
+                        "Fim": liq,
+                        "Valor": row["Valor (R$)"],
+                        "D+": row.get("D+", ""),
+                        "color": color,
+                    })
+
+                if gantt_rows:
+                    df_gantt = pd.DataFrame(gantt_rows)
+
+                    # Sort: Passivo first, then by liquidation date, then alphabetically
+                    op_order = {"Passivo": 0, "Cotizando": 1, "Resgate": 2, "Aplicação": 3}
+                    df_gantt["_sort"] = df_gantt["Operação"].map(op_order).fillna(5)
+                    df_gantt = df_gantt.sort_values(["_sort", "Fim", "Ativo"], ascending=[True, True, True])
+
+                    # Build Y labels: "Ativo (Operação)"
+                    df_gantt["Label"] = df_gantt.apply(
+                        lambda r: f"{r['Ativo']} ({r['Operação']})", axis=1
                     )
 
-                all_dates = sorted(set(list(plan_by_date.keys()) + list(passivo_dates.keys())))
+                    fig_gantt = go.Figure()
 
-                if all_dates:
-                    fig_crono = go.Figure()
+                    # Add one bar per row (horizontal Gantt)
+                    for idx, row in df_gantt.iterrows():
+                        inicio = row["Início"]
+                        fim = row["Fim"]
+                        # Ensure bar has at least 1 day width for visibility
+                        if fim <= inicio:
+                            fim = inicio + timedelta(days=1)
 
-                    # Resgates arriving (positive bars)
-                    res_vals = [plan_by_date.get(d, {}).get("resgates", 0) for d in all_dates]
-                    fig_crono.add_trace(go.Bar(
-                        x=all_dates, y=res_vals, name="Resgates (entrada)",
-                        marker_color=TAG["chart"][2], marker_line_width=0,
-                        text=[f"R$ {v:,.0f}" if v > 0 else "" for v in res_vals],
-                        textposition="outside", textfont=dict(size=10, color=TAG["offwhite"]),
-                        hovertemplate="<b>%{x|%d/%m/%Y}</b><br>Resgates: R$ %{y:,.0f}<extra></extra>",
-                    ))
+                        duracao_dias = (fim - inicio).days
 
-                    # Aplicações leaving (negative bars)
-                    apl_vals = [-plan_by_date.get(d, {}).get("aplicacoes", 0) for d in all_dates]
-                    fig_crono.add_trace(go.Bar(
-                        x=all_dates, y=apl_vals, name="Aplicações (saída)",
-                        marker_color=TAG["chart"][1], marker_line_width=0,
-                        text=[f"R$ {abs(v):,.0f}" if v < 0 else "" for v in apl_vals],
-                        textposition="outside", textfont=dict(size=10, color=TAG["offwhite"]),
-                        hovertemplate="<b>%{x|%d/%m/%Y}</b><br>Aplicações: R$ %{y:,.0f}<extra></extra>",
-                    ))
-
-                    # Passivo markers (negative, distinct color)
-                    pas_vals = [-passivo_dates.get(d, 0) for d in all_dates]
-                    if any(v < 0 for v in pas_vals):
-                        fig_crono.add_trace(go.Bar(
-                            x=all_dates, y=pas_vals, name="Passivos (obrigação)",
-                            marker_color=TAG["vermelho"], marker_line_width=0,
-                            text=[f"R$ {abs(v):,.0f}" if v < 0 else "" for v in pas_vals],
-                            textposition="outside", textfont=dict(size=10, color=TAG["vermelho"]),
-                            hovertemplate="<b>%{x|%d/%m/%Y}</b><br>Passivo: R$ %{y:,.0f}<extra></extra>",
+                        fig_gantt.add_trace(go.Bar(
+                            y=[row["Label"]],
+                            x=[(fim - inicio).total_seconds() * 1000],  # width in ms
+                            base=[inicio],
+                            orientation="h",
+                            marker_color=row["color"],
+                            marker_line=dict(width=0.5, color=TAG["bg_dark"]),
+                            text=f"R$ {row['Valor']:,.0f}",
+                            textposition="inside",
+                            textfont=dict(size=10, color=TAG["offwhite"]),
+                            insidetextanchor="middle",
+                            showlegend=False,
+                            hovertemplate=(
+                                f"<b>{row['Ativo']}</b><br>"
+                                f"Operacao: {row['Operação']}<br>"
+                                f"Solicitacao: {inicio.strftime('%d/%m/%Y')}<br>"
+                                f"Liquidacao: {row['Fim'].strftime('%d/%m/%Y')}<br>"
+                                f"Prazo: {duracao_dias} dias<br>"
+                                f"Valor: R$ {row['Valor']:,.0f}<br>"
+                                f"{row['D+']}"
+                                "<extra></extra>"
+                            ),
                         ))
 
-                    fig_crono.add_hline(y=0, line_dash="dot", line_color="rgba(230,228,219,0.3)", line_width=1)
-
-                    fig_crono.update_layout(**PLOTLY_LAYOUT, height=380, barmode="relative")
-                    fig_crono.update_layout(
-                        xaxis_title="Data de Liquidação", yaxis_title="Valor (R$)",
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
-                                    bgcolor="rgba(0,0,0,0)"),
+                    # Add today line
+                    fig_gantt.add_vline(
+                        x=today_ts, line_dash="dash",
+                        line_color=TAG["offwhite"], line_width=1.5,
+                        annotation_text="Hoje",
+                        annotation_font=dict(size=10, color=TAG["offwhite"]),
                     )
-                    st.plotly_chart(fig_crono, use_container_width=True)
+
+                    # Legend traces (invisible, just for legend)
+                    legend_items = [
+                        ("Resgate (saída)", TAG["chart"][4]),
+                        ("Aplicação (entrada)", TAG["chart"][2]),
+                    ]
+                    # Add passivo and cotizando to legend only if they exist
+                    if any(r["Operação"] == "Passivo" for r in gantt_rows):
+                        legend_items.append(("Passivo (obrigação)", TAG["vermelho"]))
+                    if any(r["Operação"] == "Cotizando" for r in gantt_rows):
+                        legend_items.append(("Cotizando (em trânsito)", TAG["chart"][5]))
+
+                    for lname, lcolor in legend_items:
+                        fig_gantt.add_trace(go.Bar(
+                            y=[None], x=[None], name=lname,
+                            marker_color=lcolor, showlegend=True,
+                        ))
+
+                    n_rows = len(df_gantt)
+                    fig_gantt.update_layout(**PLOTLY_LAYOUT, height=max(350, n_rows * 38 + 100))
+                    fig_gantt.update_layout(
+                        xaxis=dict(
+                            type="date", tickformat="%d/%m",
+                            title="", dtick="D7", tickangle=-45,
+                        ),
+                        yaxis=dict(title="", autorange="reversed"),
+                        barmode="overlay",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                                    bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
+                        margin=dict(l=220),
+                    )
+                    st.plotly_chart(fig_gantt, use_container_width=True)
+
             except Exception:
                 pass  # Non-critical visualization
 
