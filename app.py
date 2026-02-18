@@ -2774,14 +2774,111 @@ elif page == "🎯 Carteira Modelo":
                 )
                 st.plotly_chart(fig_turnover, use_container_width=True)
 
-            # Legend / explanation
-            st.caption(
-                "**Legenda:** "
-                "🔴 **Saída (Resgate)** = ativo sendo resgatado (dinheiro sai do fundo e volta para o caixa) · "
-                "🟢 **Entrada (Aplicação)** = dinheiro sendo aplicado no fundo · "
-                "🟤 **Passivo** = resgates de investidores (obrigação, reduz o PL) · "
-                f"**Turnover** = {turnover_pct:.1f}% do PL (soma de todas as movimentações / PL projetado)"
+            # Legend box
+            st.markdown(
+                f"""
+<div style="background: {TAG['bg_card']}; border: 1px solid {TAG['vermelho']}33; border-radius: 8px; padding: 16px; margin: 8px 0 16px 0;">
+<b style="color:{TAG['offwhite']}; font-size: 14px;">Legenda do Turnover</b><br><br>
+<span style="color:{TAG['chart'][4]};">&#9632;</span> <b>Saida (Resgate)</b> — Dinheiro sendo retirado do fundo e voltando para o caixa da carteira. O ativo perde posicao.<br>
+<span style="color:{TAG['chart'][2]};">&#9632;</span> <b>Entrada (Aplicacao)</b> — Dinheiro do caixa sendo aplicado no fundo. O ativo ganha posicao.<br>
+<span style="color:{TAG['vermelho']};">&#9632;</span> <b>Passivo (Investidores)</b> — Resgates de cotistas do fundo. E uma obrigacao: o dinheiro sai do PL total.<br>
+<span style="color:{TAG['chart'][5]};">&#9632;</span> <b>Cotizando</b> — Resgates ja solicitados que estao em periodo de conversao aguardando liquidacao.<br><br>
+<b>Turnover = {turnover_pct:.1f}% do PL</b> — Soma de todos os resgates + aplicacoes do plano dividida pelo PL projetado.
+</div>
+""",
+                unsafe_allow_html=True,
             )
+
+            st.divider()
+
+            # ══════════════════════════════════════════════════════
+            # ── METODOLOGIA DE CALCULO ──
+            # ══════════════════════════════════════════════════════
+            with st.expander("📐 Como os calculos sao feitos?", expanded=False):
+                cash_fund_codes_info = ctx.get("cash_fund_codes", set())
+                n_cash_funds = len(cash_fund_codes_info)
+
+                st.markdown(f"""
+**1. Posicao Projetada (base do calculo)**
+
+Partimos da posicao atual de cada ativo e aplicamos todos os movimentos pendentes
+(provisoes, cotizando, passivos) para chegar na **posicao projetada**:
+
+- **PL Projetado** = soma de todos os ativos + caixa apos movimentos = **R$ {info['pl_projetado']:,.0f}**
+- **Caixa Projetado** = caixa atual apos provisoes = **R$ {info['caixa_projetado']:,.0f}**
+
+---
+
+**2. Gap vs Modelo (aderencia)**
+
+Para cada ativo, calculamos:
+
+- **% Atual** = Financeiro do ativo / PL Projetado x 100
+- **% Alvo** = % definido na carteira modelo
+- **Gap (p.p.)** = % Alvo - % Atual
+- **Gap (R$)** = Gap (p.p.) / 100 x PL Projetado
+
+Se Gap > 0 → o ativo esta **abaixo** do modelo (precisa de aplicacao).
+Se Gap < 0 → o ativo esta **acima** do modelo (precisa de resgate).
+
+A **linha CAIXA** recebe o residual: % Alvo do Caixa = 100% - soma dos % Alvo de todos os ativos.
+
+---
+
+**3. Plano de Realocacao (5 fases)**
+
+O algoritmo gera o plano em 5 fases sequenciais:
+
+**Fase 1 — Mapa de Caixa:** Simula o caixa efetivo (linha CAIXA {"+ " + str(n_cash_funds) + " fundos classificados como caixa" if n_cash_funds > 0 else ""})
+dia a dia, registrando o impacto de cada provisao no caixa.
+
+**Fase 2 — Cobertura de Passivos:** Se algum resgate de investidor (passivo) vai gerar caixa negativo,
+o algoritmo agenda resgates de fundos overweight que liquidem **antes** do passivo. Prioriza fundos acima
+do modelo e com D+ mais curto.
+
+**Fase 3 — Resgates de Rebalanceamento:** Para cada fundo acima do modelo (Gap < 0), agenda um resgate
+pelo valor do gap. O D+ de cada fundo e respeitado: Data Liquidacao = Hoje + D+ Conversao + D+ Liquidacao.
+
+**Fase 4 — Aplicacoes com controle de caixa:** Para cada fundo abaixo do modelo (Gap > 0), encontra a
+primeira data em que o caixa comporta a aplicacao **sem ficar negativo em nenhum dia futuro**.
+{"Fundos classificados como caixa sao agendados imediatamente (a aplicacao e neutra para o caixa efetivo)." if n_cash_funds > 0 else ""}
+
+**Fase 5 — Validacao Final:** Simula todo o fluxo (provisoes + plano) dia a dia para confirmar que o
+caixa nunca fica negativo.
+
+---
+
+**4. D+ (Prazo de Liquidacao)**
+
+Cada fundo tem seus prazos obtidos da base de liquidacao:
+
+- **Conversao Resgate (D+X)** — dias apos a solicitacao para o fundo converter as cotas
+- **Liquidacao Resgate (D+Y)** — dias apos a conversao para o dinheiro cair na conta
+- **Contagem** — Dias uteis ou corridos
+- **Data Liquidacao** = Data Solicitacao + D+ Conversao + D+ Liquidacao (respeitando a contagem)
+
+Para aplicacoes: **Conversao Aplicacao (D+Z)** = dias para as cotas serem convertidas.
+
+---
+
+**5. Turnover**
+
+- **Turnover Total (R$)** = Soma de todos os resgates + aplicacoes do plano = **R$ {turnover_total:,.0f}**
+- **Turnover (% PL)** = Turnover Total / PL Projetado x 100 = **{turnover_pct:.1f}%**
+- Quanto maior o turnover, mais movimentacoes sao necessarias para atingir o modelo
+- Passivos NAO contam no turnover (sao obrigacoes, nao decisoes de realocacao)
+
+---
+
+**6. Caixa Efetivo**
+
+O caixa efetivo e a soma de:
+- **Linha CAIXA** (saldo disponivel imediato)
+{"- **Fundos com estrategia CAIXA** (" + str(n_cash_funds) + " fundos) — posicoes em fundos de liquidez imediata" if n_cash_funds > 0 else ""}
+
+Quando voce aplica em um fundo caixa, o dinheiro sai da linha CAIXA e entra no fundo — o caixa efetivo
+total nao muda (a operacao e **neutra**). Por isso o grafico mostra cada componente separado.
+""")
 
             st.divider()
 
