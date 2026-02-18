@@ -1838,7 +1838,7 @@ if page == "📂 Importar Dados":
                 prov_movements = extract_provisions_as_movements(provisoes, ativos)
                 st.session_state.provision_movements = prov_movements
 
-                st.success(f"✅ Carteira carregada: **{uploaded.name}**")
+                st.success(f"Carteira carregada: {uploaded.name}")
 
                 # Summary
                 carteira = sheets.get("carteira")
@@ -1876,7 +1876,7 @@ if page == "📂 Importar Dados":
                     })
                 df_match = pd.DataFrame(match_results)
                 matched_count = (df_match["Match"] == "✅").sum()
-                st.info(f"**{matched_count}/{len(df_match)}** ativos encontrados na base de liquidação.")
+                st.info(f"{matched_count}/{len(df_match)} ativos encontrados na base de liquidação.")
                 st.dataframe(df_match, use_container_width=True, hide_index=True)
             else:
                 st.error("Arquivo não contém a aba 'Ativos'. Verifique o formato.")
@@ -1925,7 +1925,7 @@ elif page == "📋 Posição Atual":
 
     ctx = get_portfolio_context()
     if not ctx:
-        st.warning("Nenhuma carteira carregada. Vá em **📂 Importar Dados** primeiro.")
+        st.warning("Nenhuma carteira carregada. Vá em Importar Dados primeiro.")
     else:
         ativos = ctx["ativos"]
         carteira = ctx["carteira"]
@@ -1996,7 +1996,7 @@ elif page == "📊 Projeção da Carteira":
 
     ctx = get_portfolio_context()
     if not ctx:
-        st.warning("Nenhuma carteira carregada. Vá em **📂 Importar Dados** primeiro.")
+        st.warning("Nenhuma carteira carregada. Vá em Importar Dados primeiro.")
     else:
         ativos = ctx["ativos"]
         carteira = ctx["carteira"]
@@ -2120,7 +2120,7 @@ elif page == "📊 Projeção da Carteira":
                 st.divider()
                 st.subheader("📈 Fluxo de Caixa Diário")
                 st.caption(
-                    "Projeção dia-a-dia do caixa efetivo (CAIXA + fundos D+0/D+1). "
+                    "Projeção dia-a-dia do caixa efetivo (linha CAIXA + fundos com estratégia Caixa). "
                     "O saldo nunca pode ficar negativo."
                 )
 
@@ -2128,19 +2128,19 @@ elif page == "📊 Projeção da Carteira":
                 cash_details = ctx.get("cash_details", [])
 
                 # A. Cash fund identification
-                with st.expander("💰 Fundos Considerados como Caixa (D+0/D+1)", expanded=False):
+                with st.expander("Fundos Considerados como Caixa (estratégia = Caixa)", expanded=False):
                     if cash_details:
                         df_cash = pd.DataFrame(cash_details)
                         total_cash_funds = df_cash["Financeiro (R$)"].sum()
                         st.metric("Caixa Efetivo Inicial",
                                   f"R$ {caixa_initial + total_cash_funds:,.0f}",
-                                  f"CAIXA R$ {caixa_initial:,.0f} + Fundos-Caixa R$ {total_cash_funds:,.0f}")
+                                  f"CAIXA R$ {caixa_initial:,.0f} + Fundos Caixa R$ {total_cash_funds:,.0f}")
                         st.dataframe(
                             df_cash.style.format({"Financeiro (R$)": "R$ {:,.0f}"}),
                             use_container_width=True, hide_index=True,
                         )
                     else:
-                        st.info("Nenhum fundo D+0/D+1 encontrado na carteira.")
+                        st.info("Nenhum fundo com estratégia Caixa encontrado na carteira.")
                         st.metric("Caixa Efetivo Inicial", f"R$ {caixa_initial:,.0f}")
 
                 # B. Run cash flow analysis
@@ -2151,20 +2151,20 @@ elif page == "📊 Projeção da Carteira":
                 # C. Alerts
                 if negative_dates:
                     st.error(
-                        f"🚨 **ATENÇÃO**: Caixa ficará negativo em "
-                        f"**{len(negative_dates)} data(s)**! O fundo não pode operar assim."
+                        f"ATENÇÃO: Caixa ficará negativo em "
+                        f"{len(negative_dates)} data(s)! O fundo não pode operar assim."
                     )
                     for nd in negative_dates[:5]:  # Show first 5
                         st.warning(
-                            f"📅 **{nd['date'].strftime('%d/%m/%Y')}** — "
-                            f"Saldo: **R$ {nd['balance']:,.0f}** — "
-                            f"Déficit: **R$ {nd['shortfall']:,.0f}**"
+                            f"{nd['date'].strftime('%d/%m/%Y')} — "
+                            f"Saldo: R$ {nd['balance']:,.0f} — "
+                            f"Déficit: R$ {nd['shortfall']:,.0f}"
                         )
                     if len(negative_dates) > 5:
                         st.caption(f"... e mais {len(negative_dates) - 5} datas com saldo negativo.")
                 else:
                     if not df_timeline.empty:
-                        st.success("✅ **Fluxo de caixa positivo** em todas as datas. Nenhum risco de caixa negativo.")
+                        st.success("Fluxo de caixa positivo em todas as datas. Nenhum risco de caixa negativo.")
 
                 # D. Chart
                 if not df_timeline.empty:
@@ -2290,9 +2290,9 @@ elif page == "🎯 Carteira Modelo":
 
     ctx = get_portfolio_context()
     if not ctx:
-        st.warning("Nenhuma carteira carregada. Vá em **📂 Importar Dados** primeiro.")
+        st.warning("Nenhuma carteira carregada. Vá em Importar Dados primeiro.")
     elif not st.session_state.model_loaded:
-        st.warning("Nenhuma carteira modelo carregada. Vá em **📂 Importar Dados** → aba **🎯 Carteira Modelo**.")
+        st.warning("Nenhuma carteira modelo carregada. Vá em Importar Dados, aba Carteira Modelo.")
     else:
         model_df = st.session_state.model_df
         ativos = ctx["ativos"]
@@ -2599,18 +2599,18 @@ elif page == "🎯 Carteira Modelo":
 
             if neg_plan:
                 st.error(
-                    f"🚨 **ATENÇÃO**: Com este plano, o caixa ficará negativo em "
-                    f"**{len(neg_plan)} data(s)**!"
+                    f"ATENÇÃO: Com este plano, o caixa ficará negativo em "
+                    f"{len(neg_plan)} data(s)!"
                 )
                 for nd in neg_plan[:5]:
                     st.warning(
-                        f"📅 **{nd['date'].strftime('%d/%m/%Y')}** — "
-                        f"Saldo: **R$ {nd['balance']:,.0f}** — "
-                        f"Déficit: **R$ {nd['shortfall']:,.0f}**"
+                        f"{nd['date'].strftime('%d/%m/%Y')} — "
+                        f"Saldo: R$ {nd['balance']:,.0f} — "
+                        f"Déficit: R$ {nd['shortfall']:,.0f}"
                     )
             else:
                 if not tl_plan.empty:
-                    st.success("✅ **Plano viável!** Caixa positivo em todas as datas.")
+                    st.success("Plano viável! Caixa positivo em todas as datas.")
 
             if not tl_plan.empty:
                 fig_plan = go.Figure()
