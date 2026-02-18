@@ -2713,6 +2713,53 @@ elif page == "🎯 Carteira Modelo":
                 display_provisions_summary(combined_movements, expanded=False)
                 display_evolution_tables(df_evo_fin, df_evo_pct, evo_date_cols, model_map=model_map)
 
+                # ── Composition evolution chart ──
+                if evo_date_cols:
+                    st.subheader("Evolucao da Composicao da Carteira")
+                    st.caption("Como o % de cada fundo muda ao longo das datas de liquidacao. As linhas tracejadas mostram o % alvo do modelo.")
+
+                    # Build data: each fund's % at each date
+                    fund_rows = df_evo_pct[~df_evo_pct["Ativo"].isin(["📊 TOTAL PL", "💰 CAIXA"])].copy()
+                    time_points = ["Atual (%)"] + evo_date_cols
+                    time_labels = ["Hoje"] + evo_date_cols
+
+                    fig_evo_comp = go.Figure()
+                    for idx, (_, fund_row) in enumerate(fund_rows.iterrows()):
+                        ativo = fund_row["Ativo"]
+                        code = fund_row["Código"]
+                        color = TAG["chart"][idx % len(TAG["chart"])]
+                        y_vals = [fund_row[tp] for tp in time_points]
+                        fig_evo_comp.add_trace(go.Scatter(
+                            x=time_labels, y=y_vals,
+                            mode="lines+markers", name=ativo[:25],
+                            line=dict(color=color, width=2.5),
+                            marker=dict(size=7, color=color),
+                            hovertemplate=(
+                                f"<b>{ativo[:30]}</b><br>"
+                                "%{x}<br>%{y:.2f}%<extra></extra>"
+                            ),
+                        ))
+                        # Model target line (dashed horizontal)
+                        target = model_map.get(code, None)
+                        if target and target > 0:
+                            fig_evo_comp.add_trace(go.Scatter(
+                                x=[time_labels[0], time_labels[-1]], y=[target, target],
+                                mode="lines", name=f"Alvo {ativo[:15]}",
+                                line=dict(color=color, width=1.5, dash="dot"),
+                                showlegend=False,
+                                hovertemplate=f"<b>Alvo {ativo[:25]}</b>: {target:.1f}%<extra></extra>",
+                            ))
+
+                    fig_evo_comp.update_layout(**PLOTLY_LAYOUT, height=450)
+                    fig_evo_comp.update_layout(
+                        xaxis_title="", yaxis_title="% PL",
+                        yaxis=dict(ticksuffix="%"),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                                    bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
+                        hovermode="x unified",
+                    )
+                    st.plotly_chart(fig_evo_comp, use_container_width=True)
+
                 # Final comparison chart: Atual → Projeção → Modelo
                 if evo_date_cols:
                     last_dc = evo_date_cols[-1]
@@ -2786,9 +2833,20 @@ elif page == "🎯 Carteira Modelo":
             st.divider()
             st.subheader("📈 Fluxo de Caixa Diário (Provisões + Plano)")
             st.caption(
-                "Simulação dia a dia do caixa efetivo (CAIXA + fundos estratégia Caixa). "
-                "O saldo NUNCA pode ficar negativo — esta é a principal validação do plano."
+                "Simulacao dia a dia do caixa efetivo (CAIXA + fundos estrategia Caixa). "
+                "O saldo NUNCA pode ficar negativo — esta e a principal validacao do plano."
             )
+
+            # Show plan summary metrics
+            n_resg_plan = sum(1 for m in plan_movements if m["operation"] == "Resgate")
+            n_aplic_plan = sum(1 for m in plan_movements if "Aplicação" in m["operation"])
+            val_resg_plan = sum(m["value"] for m in plan_movements if m["operation"] == "Resgate")
+            val_aplic_plan = sum(m["value"] for m in plan_movements if "Aplicação" in m["operation"])
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.metric("Provisoes Existentes", f"{len(all_movements)} movimentos")
+            mc2.metric("Resgates do Plano", f"{n_resg_plan}", f"R$ {val_resg_plan:,.0f}")
+            mc3.metric("Aplicacoes do Plano", f"{n_aplic_plan}", f"R$ {val_aplic_plan:,.0f}")
+            mc4.metric("Total Combinado", f"{len(combined_movements)} movimentos")
 
             cash_fund_codes = ctx.get("cash_fund_codes", set())
             sug_plan, neg_plan, tl_plan, init_plan = suggest_request_dates(
@@ -2797,18 +2855,18 @@ elif page == "🎯 Carteira Modelo":
 
             if neg_plan:
                 st.error(
-                    f"ATENÇÃO: Com este plano, o caixa ficará negativo em "
+                    f"ATENCAO: Com este plano, o caixa ficara negativo em "
                     f"{len(neg_plan)} data(s)!"
                 )
                 for nd in neg_plan[:5]:
                     st.warning(
                         f"{nd['date'].strftime('%d/%m/%Y')} — "
                         f"Saldo: R$ {nd['balance']:,.0f} — "
-                        f"Déficit: R$ {nd['shortfall']:,.0f}"
+                        f"Deficit: R$ {nd['shortfall']:,.0f}"
                     )
             else:
                 if not tl_plan.empty:
-                    st.success("Plano viável! Caixa positivo em todas as datas.")
+                    st.success("Plano viavel! Caixa positivo em todas as datas.")
 
             if not tl_plan.empty:
                 fig_plan = build_cashflow_chart(tl_plan)
