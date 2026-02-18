@@ -580,16 +580,22 @@ def build_cash_flow_timeline(caixa_initial, ativos_df, all_movements, cash_fund_
     Build day-by-day cash flow timeline.
     Cash efetivo = caixa_initial + sum of cash-equivalent fund positions.
     Returns (df_timeline, initial_effective_cash).
+    df_timeline includes per-component columns for each cash fund.
     """
     cod_col = find_col(ativos_df, "CÓD. ATIVO", "COD. ATIVO")
 
     # Compute initial effective cash (CAIXA + cash fund positions)
-    cash_fund_total = 0.0
+    # Track each cash fund individually
+    cash_components = {"CAIXA": caixa_initial}  # code → initial balance
+    cash_fund_names = {"CAIXA": "Linha CAIXA"}  # code → display name
     for _, row in ativos_df.iterrows():
         code = str(row[cod_col]) if cod_col else ""
         if code in cash_fund_codes:
-            cash_fund_total += float(row.get("FINANCEIRO", 0))
-    initial_effective_cash = caixa_initial + cash_fund_total
+            fin = float(row.get("FINANCEIRO", 0))
+            name = str(row.get("ATIVO", ""))[:35]
+            cash_components[code] = fin
+            cash_fund_names[code] = name
+    initial_effective_cash = sum(cash_components.values())
 
     if not all_movements:
         return pd.DataFrame(), initial_effective_cash
@@ -604,63 +610,84 @@ def build_cash_flow_timeline(caixa_initial, ativos_df, all_movements, cash_fund_
     if last_date < today:
         last_date = today + timedelta(days=5)
 
-    # Build daily event map: {date: [(description, amount_on_cash)]}
+    # Build daily event map: {date: [(description, cash_impact_total, component_impacts)]}
+    # component_impacts: {code: delta} for per-fund tracking
     events = {}
     for m in valid_movs:
         liq_date = pd.Timestamp(m["liquidation_date"])
         if liq_date < today:
-            continue  # Past movements are already in initial balances
+            continue
         fund_code = str(m.get("fund_code", ""))
         op = m["operation"]
         value = m["value"]
         fund_name = m.get("fund_name", "")[:40]
         is_cash_fund = fund_code in cash_fund_codes
 
-        # Determine cash impact
         cash_impact = 0.0
+        comp_impacts = {}  # per-component impact
+
         if op == "Resgate Passivo":
-            cash_impact = -value  # Investors withdrawing
-            desc = f"⬇️ Resgate Passivo: -R$ {value:,.0f}"
+            cash_impact = -value
+            comp_impacts["CAIXA"] = -value
+            desc = f"Resgate Passivo: -R$ {value:,.0f}"
         elif op in ("Resgate (Cotizando)", "Resgate (Provisão)", "Resgate"):
             if is_cash_fund:
-                cash_impact = 0.0  # Cash-to-cash: net zero
-                desc = f"↔️ Resgate caixa ({fund_name}): R$ {value:,.0f} (neutro)"
+                # Cash fund → CAIXA: fund goes down, CAIXA goes up, total unchanged
+                cash_impact = 0.0
+                comp_impacts[fund_code] = -value
+                comp_impacts["CAIXA"] = comp_impacts.get("CAIXA", 0) + value
+                desc = f"Resgate caixa ({fund_name}): R$ {value:,.0f} (neutro)"
             else:
-                cash_impact = +value  # Non-cash fund → caixa
-                desc = f"⬆️ Resgate {fund_name}: +R$ {value:,.0f}"
+                cash_impact = +value
+                comp_impacts["CAIXA"] = +value
+                desc = f"Resgate {fund_name}: +R$ {value:,.0f}"
         elif "Aplicação" in op:
             if is_cash_fund:
-                cash_impact = 0.0  # Caixa-to-cash fund: net zero
-                desc = f"↔️ Aplicação caixa ({fund_name}): R$ {value:,.0f} (neutro)"
+                # CAIXA → cash fund: CAIXA goes down, fund goes up, total unchanged
+                cash_impact = 0.0
+                comp_impacts["CAIXA"] = comp_impacts.get("CAIXA", 0) - value
+                comp_impacts[fund_code] = +value
+                desc = f"Aplicacao caixa ({fund_name}): R$ {value:,.0f} (neutro)"
             else:
-                cash_impact = -value  # Caixa → non-cash fund
-                desc = f"⬇️ Aplicação {fund_name}: -R$ {value:,.0f}"
+                cash_impact = -value
+                comp_impacts["CAIXA"] = -value
+                desc = f"Aplicacao {fund_name}: -R$ {value:,.0f}"
         elif op == "Débito/Passivo":
             cash_impact = -value
-            desc = f"⬇️ Débito: -R$ {value:,.0f}"
+            comp_impacts["CAIXA"] = -value
+            desc = f"Debito: -R$ {value:,.0f}"
         elif op == "Crédito (Provisão)":
             cash_impact = +value
-            desc = f"⬆️ Crédito: +R$ {value:,.0f}"
+            comp_impacts["CAIXA"] = +value
+            desc = f"Credito: +R$ {value:,.0f}"
         else:
-            desc = f"❓ {op}: R$ {value:,.0f}"
+            desc = f"{op}: R$ {value:,.0f}"
 
         if liq_date not in events:
             events[liq_date] = []
-        events[liq_date].append((desc, cash_impact))
+        events[liq_date].append((desc, cash_impact, comp_impacts))
 
     # Generate timeline (business days only)
     rows = []
     running_balance = initial_effective_cash
+    running_components = dict(cash_components)  # copy
     current = today
     while current <= last_date + timedelta(days=3):
-        if current.weekday() < 5:  # Business days only
+        if current.weekday() < 5:
             day_events = events.get(current, [])
-            inflows = sum(amt for _, amt in day_events if amt > 0)
-            outflows = sum(abs(amt) for _, amt in day_events if amt < 0)
+            inflows = sum(ci for _, ci, _ in day_events if ci > 0)
+            outflows = sum(abs(ci) for _, ci, _ in day_events if ci < 0)
             net = inflows - outflows
             running_balance += net
-            details = " | ".join(d for d, _ in day_events) if day_events else ""
-            rows.append({
+
+            # Update per-component balances
+            for _, _, comp_imp in day_events:
+                for comp_code, delta in comp_imp.items():
+                    if comp_code in running_components:
+                        running_components[comp_code] += delta
+
+            details = " | ".join(d for d, _, _ in day_events) if day_events else ""
+            row_data = {
                 "Data": current,
                 "Entradas (R$)": inflows,
                 "Saídas (R$)": outflows,
@@ -669,7 +696,12 @@ def build_cash_flow_timeline(caixa_initial, ativos_df, all_movements, cash_fund_
                 "Detalhes": details,
                 "Negativo": running_balance < 0,
                 "Tem Evento": len(day_events) > 0,
-            })
+            }
+            # Add per-component columns (prefixed with _ for identification)
+            for comp_code in cash_components:
+                comp_name = cash_fund_names.get(comp_code, comp_code)
+                row_data[f"_{comp_name}"] = running_components.get(comp_code, 0)
+            rows.append(row_data)
         current += timedelta(days=1)
 
     df_timeline = pd.DataFrame(rows)
@@ -1470,7 +1502,9 @@ def generate_smart_rebalancing_plan(
 # ─────────────────────────────────────────────────────────
 
 def build_cashflow_chart(df_timeline):
-    """Build a clean cash flow chart from a timeline DataFrame. Returns a plotly Figure."""
+    """Build a clean cash flow chart from a timeline DataFrame. Returns a plotly Figure.
+    Shows individual lines for each cash component (CAIXA + each cash fund).
+    """
     if df_timeline.empty:
         fig = go.Figure()
         fig.update_layout(**PLOTLY_LAYOUT, height=300)
@@ -1480,47 +1514,44 @@ def build_cashflow_chart(df_timeline):
 
     fig = go.Figure()
 
-    # Build per-day custom hover text for the main line
-    main_hover = []
-    for _, row in df_timeline.iterrows():
-        d = row["Data"]
-        s = row["Saldo (R$)"]
-        ent_val = row["Entradas (R$)"]
-        sai_val = row["Saídas (R$)"]
-        parts = [f"<b>{d.strftime('%d/%m/%Y')}</b>", f"Saldo: R$ {s:,.0f}"]
-        if ent_val > 0:
-            parts.append(f"Entradas: +R$ {ent_val:,.0f}")
-        if sai_val > 0:
-            parts.append(f"Saidas: -R$ {sai_val:,.0f}")
-        main_hover.append("<br>".join(parts) + "<extra></extra>")
+    # Component columns start with "_" (e.g. "_CAIXA", "_12345")
+    comp_cols = [c for c in df_timeline.columns if c.startswith("_")]
 
-    # Main line: saldo over time (step line — balance is constant until next event)
+    # ── Per-component stacked area (if available) ──
+    if comp_cols and len(comp_cols) > 1:
+        colors_comp = [TAG["chart"][0], TAG["chart"][5], TAG["chart"][2],
+                       TAG["chart"][3], TAG["chart"][6], TAG["chart"][7]]
+        for idx, col in enumerate(comp_cols):
+            comp_name = col[1:]  # remove leading _
+            color = colors_comp[idx % len(colors_comp)]
+            fig.add_trace(go.Scatter(
+                x=df_timeline["Data"], y=df_timeline[col],
+                mode="lines", name=comp_name[:30],
+                line=dict(color=color, width=2, shape="hv"),
+                stackgroup="components",
+                hovertemplate=f"<b>{comp_name[:30]}</b><br>" + "%{x|%d/%m/%Y}<br>R$ %{y:,.0f}<extra></extra>",
+            ))
+    else:
+        # Fallback: single total line if no components
+        fig.add_trace(go.Scatter(
+            x=df_timeline["Data"], y=df_timeline["Saldo (R$)"],
+            mode="lines", name="Caixa Efetivo",
+            line=dict(color=TAG["chart"][2], width=2.5, shape="hv"),
+            fill="tozeroy", fillcolor="rgba(107,222,151,0.08)",
+            hovertemplate="<b>%{x|%d/%m/%Y}</b><br>Saldo: R$ %{y:,.0f}<extra></extra>",
+        ))
+
+    # Total effective cash line (always on top, thicker)
     fig.add_trace(go.Scatter(
         x=df_timeline["Data"], y=df_timeline["Saldo (R$)"],
-        mode="lines+markers", name="Saldo",
-        line=dict(color=TAG["chart"][2], width=2.5, shape="hv"),
-        marker=dict(size=3, color=TAG["chart"][2]),
-        hovertemplate=main_hover,
+        mode="lines", name="Total Caixa Efetivo",
+        line=dict(color=TAG["offwhite"], width=2.5, dash="dot", shape="hv"),
+        hovertemplate="<b>Total Caixa Efetivo</b><br>%{x|%d/%m/%Y}<br>R$ %{y:,.0f}<extra></extra>",
     ))
 
-    # Fill green above zero
-    fig.add_trace(go.Scatter(
-        x=df_timeline["Data"], y=df_timeline["Saldo (R$)"].clip(lower=0),
-        fill="tozeroy", mode="none", name="Positivo",
-        fillcolor="rgba(107,222,151,0.10)", showlegend=False,
-        hoverinfo="skip",
-    ))
-
-    # Fill red below zero
+    # Fill red below zero on total
     neg_vals = df_timeline["Saldo (R$)"].clip(upper=0)
     if (neg_vals < 0).any():
-        fig.add_trace(go.Scatter(
-            x=df_timeline["Data"], y=neg_vals,
-            fill="tozeroy", mode="none", name="Negativo",
-            fillcolor="rgba(237,90,110,0.15)", showlegend=False,
-            hoverinfo="skip",
-        ))
-        # X markers on negative days
         neg_days = df_timeline[df_timeline["Saldo (R$)"] < 0]
         neg_hover = [
             f"<b>DEFICIT</b><br>{d.strftime('%d/%m/%Y')}<br>R$ {s:,.0f}<extra></extra>"
@@ -1533,45 +1564,15 @@ def build_cashflow_chart(df_timeline):
             hovertemplate=neg_hover,
         ))
 
-    # Event day markers (entradas / saídas) — larger, more visible
-    event_days = df_timeline[df_timeline["Tem Evento"]].copy()
-    if not event_days.empty:
-        ent = event_days[event_days["Entradas (R$)"] > 0]
-        sai = event_days[event_days["Saídas (R$)"] > 0]
-        if not ent.empty:
-            ent_hover = [
-                f"<b>Entrada</b><br>{d.strftime('%d/%m/%Y')}<br>+R$ {v:,.0f}<br>Saldo: R$ {s:,.0f}<extra></extra>"
-                for d, v, s in zip(ent["Data"], ent["Entradas (R$)"], ent["Saldo (R$)"])
-            ]
-            fig.add_trace(go.Scatter(
-                x=ent["Data"], y=ent["Saldo (R$)"],
-                mode="markers", name="Entrada",
-                marker=dict(size=10, color=TAG["chart"][2], symbol="triangle-up",
-                            line=dict(width=1, color=TAG["offwhite"])),
-                hovertemplate=ent_hover,
-            ))
-        if not sai.empty:
-            sai_hover = [
-                f"<b>Saida</b><br>{d.strftime('%d/%m/%Y')}<br>-R$ {v:,.0f}<br>Saldo: R$ {s:,.0f}<extra></extra>"
-                for d, v, s in zip(sai["Data"], sai["Saídas (R$)"], sai["Saldo (R$)"])
-            ]
-            fig.add_trace(go.Scatter(
-                x=sai["Data"], y=sai["Saldo (R$)"],
-                mode="markers", name="Saida",
-                marker=dict(size=10, color=TAG["chart"][4], symbol="triangle-down",
-                            line=dict(width=1, color=TAG["offwhite"])),
-                hovertemplate=sai_hover,
-            ))
-
     # Zero reference line
     fig.add_hline(y=0, line_dash="dot", line_color="rgba(230,228,219,0.35)", line_width=1.5)
 
-    fig.update_layout(**PLOTLY_LAYOUT, height=400)
+    fig.update_layout(**PLOTLY_LAYOUT, height=420)
     fig.update_layout(
         xaxis_title="", yaxis_title="Saldo (R$)",
         xaxis=dict(
             tickformat="%d/%m",
-            dtick="D7",  # Tick every 7 days
+            dtick="D7",
             tickangle=-45,
         ),
         yaxis=dict(
@@ -1579,9 +1580,9 @@ def build_cashflow_chart(df_timeline):
             tickprefix="R$ ",
         ),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
-                    bgcolor="rgba(0,0,0,0)", font=dict(size=11)),
+                    bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
         dragmode="zoom",
-        hovermode="closest",
+        hovermode="x unified",
     )
     return fig
 
