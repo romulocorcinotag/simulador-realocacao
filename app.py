@@ -1940,10 +1940,43 @@ if page == "📂 Importar Dados":
             st.divider()
             st.markdown("#### Adicionar Ativo ao Modelo")
 
+            # Load available funds from liquidation database
+            liquid_df = load_liquidation_data()
+            existing_codes = set(model_df["Código"].astype(str))
+
+            # Build options: "Apelido (Código Anbima) — Categoria"
+            fund_options = []
+            fund_lookup = {}  # display_name → {code, name}
+            for _, frow in liquid_df.iterrows():
+                code = str(frow.get("Código Anbima", "")).strip()
+                name = str(frow.get("Apelido", "")).strip()
+                categoria = str(frow.get("Categoria", "")).strip()
+                if not name or code in existing_codes:
+                    continue
+                d_conv = int(frow.get("Conversão Resgate", 0))
+                d_liq = int(frow.get("Liquid. Resgate", 0))
+                display = f"{name}  |  Cód: {code}  |  {categoria}  |  D+{d_conv}+{d_liq}"
+                fund_options.append(display)
+                fund_lookup[display] = {"code": code, "name": name}
+
+            selected_fund = st.selectbox(
+                "Buscar ativo disponível",
+                options=[""] + fund_options,
+                index=0,
+                placeholder="Digite para buscar...",
+                key="model_fund_search",
+            )
+
+            sel_code = ""
+            sel_name = ""
+            if selected_fund and selected_fund in fund_lookup:
+                sel_code = fund_lookup[selected_fund]["code"]
+                sel_name = fund_lookup[selected_fund]["name"]
+
             with st.form("add_model_asset", clear_on_submit=True):
                 ac1, ac2, ac3 = st.columns([1, 2, 1])
-                new_code = ac1.text_input("Código", placeholder="Ex: 1234")
-                new_name = ac2.text_input("Nome do Ativo", placeholder="Ex: BTG Pactual Tesouro SELIC")
+                new_code = ac1.text_input("Código", value=sel_code)
+                new_name = ac2.text_input("Nome do Ativo", value=sel_name)
                 new_pct = ac3.number_input("% Alvo", min_value=0.0, max_value=100.0, step=0.5, value=0.0)
 
                 submitted = st.form_submit_button("Adicionar ao Modelo", type="primary")
@@ -1958,8 +1991,6 @@ if page == "📂 Importar Dados":
                             "Ativo": new_name.strip(),
                             "% Alvo": new_pct,
                         }])
-                        # Check duplicate
-                        existing_codes = set(model_df["Código"].astype(str))
                         if new_code.strip() in existing_codes and new_code.strip():
                             st.warning(f"Código {new_code} já existe no modelo. Altere o % Alvo na tabela acima.")
                         else:
