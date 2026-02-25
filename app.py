@@ -1613,13 +1613,30 @@ def build_cashflow_chart(df_timeline):
     # Zero reference line
     fig.add_hline(y=0, line_dash="dot", line_color="rgba(230,228,219,0.35)", line_width=1.5)
 
+    # Compute smart tick spacing based on date range
+    _dates = df_timeline["Data"]
+    _date_range_days = (_dates.max() - _dates.min()).days if len(_dates) > 1 else 1
+    if _date_range_days <= 14:
+        _x_dtick = "D1"
+        _x_fmt = "%d/%m"
+    elif _date_range_days <= 60:
+        _x_dtick = "D7"
+        _x_fmt = "%d/%m"
+    elif _date_range_days <= 180:
+        _x_dtick = "M1"
+        _x_fmt = "%b/%y"
+    else:
+        _x_dtick = "M2"
+        _x_fmt = "%b/%y"
+
     fig.update_layout(**PLOTLY_LAYOUT, height=450)
     fig.update_layout(
         xaxis_title="", yaxis_title="Saldo (R$)",
         xaxis=dict(
-            tickformat="%d/%m",
-            dtick="D7",
+            tickformat=_x_fmt,
+            dtick=_x_dtick,
             tickangle=-45,
+            tickfont=dict(size=10),
         ),
         yaxis=dict(
             tickformat=",.0f",
@@ -1894,8 +1911,7 @@ with st.sidebar:
         "Navegação",
         [
             "📂 Importar Dados",
-            "📋 Posição Atual",
-            "📊 Projeção da Carteira",
+            "📊 Carteira",
             "🎯 Carteira Modelo",
             "📅 Dados de Liquidação",
         ],
@@ -2143,113 +2159,8 @@ if page == "📂 Importar Dados":
 # PAGE: POSIÇÃO ATUAL
 # ═══════════════════════════════════════════════════════════
 
-elif page == "📋 Posição Atual":
-    st.header("Posição Atual da Carteira")
-
-    ctx = get_portfolio_context()
-    if not ctx:
-        st.warning("Nenhuma carteira carregada. Vá em Importar Dados primeiro.")
-    else:
-        ativos = ctx["ativos"]
-        carteira = ctx["carteira"]
-
-        if carteira is not None and not carteira.empty:
-            row = carteira.iloc[0]
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                pl = row.get("PL PROJETADO", row.get("PL FECHAMENTO", 0))
-                st.metric("PL Total", f"R$ {pl:,.2f}")
-            with col2:
-                caixa = row.get("CAIXA", 0)
-                st.metric("Caixa", f"R$ {caixa:,.2f}")
-            with col3:
-                liq_d0 = row.get("LIQUIDEZ D0", 0)
-                st.metric("Liquidez D0", f"R$ {liq_d0:,.2f}")
-            with col4:
-                st.metric("Ativos", len(ativos))
-
-        # Table — include CAIXA as a row
-        st.subheader("Ativos")
-        caixa_val = ctx["caixa_initial"]
-        pl_val = ctx["pl_total"]
-        estrategia_col = find_col(ativos, "ESTRATÉGIA", "ESTRATEGIA")
-        preco_col = find_col(ativos, "PREÇO", "PRECO")
-
-        # Build CAIXA row to prepend
-        caixa_row_data = {"ATIVO": "CAIXA", "FINANCEIRO": caixa_val}
-        if "% PL" in ativos.columns:
-            caixa_row_data["% PL"] = (caixa_val / pl_val * 100) if pl_val > 0 else 0
-        if estrategia_col and estrategia_col in ativos.columns:
-            caixa_row_data[estrategia_col] = "CAIXA"
-        if "CLASSE" in ativos.columns:
-            caixa_row_data["CLASSE"] = "Caixa"
-        caixa_row = pd.DataFrame([caixa_row_data])
-        ativos_com_caixa = pd.concat([caixa_row, ativos], ignore_index=True)
-
-        display_col_candidates = [
-            "ATIVO", "CLASSE", estrategia_col or "ESTRATÉGIA",
-            "QUANTIDADE", preco_col or "PREÇO", "FINANCEIRO", "% PL",
-        ]
-        available_cols = [c for c in display_col_candidates if c and c in ativos_com_caixa.columns]
-        df_display = ativos_com_caixa[available_cols].copy()
-        fmt = {"FINANCEIRO": "R$ {:,.2f}", "QUANTIDADE": "{:,.2f}", "% PL": "{:.2f}%"}
-        if preco_col and preco_col in df_display.columns:
-            fmt[preco_col] = "R$ {:,.6f}"
-        st.dataframe(df_display.style.format(fmt, na_rep="—"), use_container_width=True, hide_index=True, height=400)
-
-        # Charts — include CAIXA
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("Alocação por Ativo")
-            # Add CAIXA to pie data
-            pie_source = ativos_com_caixa[["ATIVO", "FINANCEIRO"]].copy()
-            top_n = pie_source.nlargest(10, "FINANCEIRO")
-            others = pie_source[~pie_source.index.isin(top_n.index)]
-            if not others.empty:
-                others_row = pd.DataFrame([{"ATIVO": "Outros", "FINANCEIRO": others["FINANCEIRO"].sum()}])
-                pie_data = pd.concat([top_n[["ATIVO", "FINANCEIRO"]], others_row], ignore_index=True)
-            else:
-                pie_data = top_n[["ATIVO", "FINANCEIRO"]].copy()
-            fig = go.Figure(go.Pie(
-                labels=pie_data["ATIVO"], values=pie_data["FINANCEIRO"],
-                hole=0.5, textinfo="label+percent", textposition="outside",
-                textfont=dict(size=11, color=TAG["offwhite"]),
-                marker=dict(colors=TAG["chart"], line=dict(color=TAG["bg_dark"], width=1.5)),
-                hovertemplate="<b>%{label}</b><br>R$ %{value:,.0f}<br>%{percent}<extra></extra>",
-                pull=[0.02] * len(pie_data),
-            ))
-            fig.update_layout(**PLOTLY_LAYOUT, height=420, showlegend=False)
-            fig.update_layout(margin=dict(t=20, b=20, l=20, r=20))
-            st.plotly_chart(fig, use_container_width=True)
-        with col2:
-            strat_col = find_col(ativos_com_caixa, "ESTRATÉGIA", "ESTRATEGIA")
-            if strat_col and strat_col in ativos_com_caixa.columns:
-                st.subheader("Alocação por Estratégia")
-                strat = ativos_com_caixa.groupby(strat_col)["FINANCEIRO"].sum().reset_index().sort_values("FINANCEIRO", ascending=True)
-                fig2 = go.Figure(go.Bar(
-                    y=strat[strat_col], x=strat["FINANCEIRO"],
-                    orientation="h",
-                    marker_color=TAG["laranja"], marker_line_width=0,
-                    text=strat["FINANCEIRO"].apply(lambda v: f"R$ {v:,.0f}"),
-                    textposition="auto", textfont=dict(color=TAG["offwhite"], size=11),
-                    hovertemplate="<b>%{y}</b><br>R$ %{x:,.0f}<extra></extra>",
-                ))
-                fig2.update_layout(**PLOTLY_LAYOUT, height=420)
-                fig2.update_layout(xaxis_title="Financeiro (R$)", yaxis_title="", margin=dict(l=140))
-                st.plotly_chart(fig2, use_container_width=True)
-
-        # Provisões
-        if ctx["provision_movs"]:
-            st.divider()
-            display_provisions_summary(ctx["provision_movs"], expanded=False)
-
-
-# ═══════════════════════════════════════════════════════════
-# PAGE: PROJEÇÃO DA CARTEIRA
-# ═══════════════════════════════════════════════════════════
-
-elif page == "📊 Projeção da Carteira":
-    st.header("Projeção da Carteira")
+elif page == "📊 Carteira":
+    st.header("Carteira")
 
     ctx = get_portfolio_context()
     if not ctx:
@@ -2261,309 +2172,408 @@ elif page == "📊 Projeção da Carteira":
         pl_total = ctx["pl_total"]
         all_movements = ctx["all_movements"]
 
-        # ── Add manual movement inline ──
-        with st.expander("➕ Adicionar Movimento Manual", expanded=False):
-            fund_names = ativos["ATIVO"].tolist()
-            cod_col = ctx["cod_col"]
+        tab_pos, tab_proj, tab_cf = st.tabs([
+            "📈 Posição Atual",
+            "📊 Projeção",
+            "💰 Fluxo de Caixa",
+        ])
 
-            col1, col2, col3, col4 = st.columns(4)
+        # ── TAB 1: Posição Atual ──
+        with tab_pos:
+            if carteira is not None and not carteira.empty:
+                row = carteira.iloc[0]
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    pl = row.get("PL PROJETADO", row.get("PL FECHAMENTO", 0))
+                    st.metric("PL Total", f"R$ {pl:,.2f}")
+                with col2:
+                    caixa = row.get("CAIXA", 0)
+                    st.metric("Caixa", f"R$ {caixa:,.2f}")
+                with col3:
+                    liq_d0 = row.get("LIQUIDEZ D0", 0)
+                    st.metric("Liquidez D0", f"R$ {liq_d0:,.2f}")
+                with col4:
+                    st.metric("Ativos", len(ativos))
+
+            # Table — include CAIXA as a row
+            st.subheader("Ativos")
+            caixa_val = ctx["caixa_initial"]
+            pl_val = ctx["pl_total"]
+            estrategia_col = find_col(ativos, "ESTRATÉGIA", "ESTRATEGIA")
+            preco_col = find_col(ativos, "PREÇO", "PRECO")
+
+            # Build CAIXA row to prepend
+            caixa_row_data = {"ATIVO": "CAIXA", "FINANCEIRO": caixa_val}
+            if "% PL" in ativos.columns:
+                caixa_row_data["% PL"] = (caixa_val / pl_val * 100) if pl_val > 0 else 0
+            if estrategia_col and estrategia_col in ativos.columns:
+                caixa_row_data[estrategia_col] = "CAIXA"
+            if "CLASSE" in ativos.columns:
+                caixa_row_data["CLASSE"] = "Caixa"
+            caixa_row = pd.DataFrame([caixa_row_data])
+            ativos_com_caixa = pd.concat([caixa_row, ativos], ignore_index=True)
+
+            display_col_candidates = [
+                "ATIVO", "CLASSE", estrategia_col or "ESTRATÉGIA",
+                "QUANTIDADE", preco_col or "PREÇO", "FINANCEIRO", "% PL",
+            ]
+            available_cols = [c for c in display_col_candidates if c and c in ativos_com_caixa.columns]
+            df_display = ativos_com_caixa[available_cols].copy()
+            fmt = {"FINANCEIRO": "R$ {:,.2f}", "QUANTIDADE": "{:,.2f}", "% PL": "{:.2f}%"}
+            if preco_col and preco_col in df_display.columns:
+                fmt[preco_col] = "R$ {:,.6f}"
+            st.dataframe(df_display.style.format(fmt, na_rep="—"), use_container_width=True, hide_index=True, height=400)
+
+            # Charts — include CAIXA
+            col1, col2 = st.columns(2)
             with col1:
-                operation = st.selectbox("Operação", ["Resgate", "Aplicação"])
+                st.subheader("Alocação por Ativo")
+                pie_source = ativos_com_caixa[["ATIVO", "FINANCEIRO"]].copy()
+                top_n = pie_source.nlargest(10, "FINANCEIRO")
+                others = pie_source[~pie_source.index.isin(top_n.index)]
+                if not others.empty:
+                    others_row = pd.DataFrame([{"ATIVO": "Outros", "FINANCEIRO": others["FINANCEIRO"].sum()}])
+                    pie_data = pd.concat([top_n[["ATIVO", "FINANCEIRO"]], others_row], ignore_index=True)
+                else:
+                    pie_data = top_n[["ATIVO", "FINANCEIRO"]].copy()
+                fig = go.Figure(go.Pie(
+                    labels=pie_data["ATIVO"], values=pie_data["FINANCEIRO"],
+                    hole=0.5, textinfo="label+percent", textposition="outside",
+                    textfont=dict(size=11, color=TAG["offwhite"]),
+                    marker=dict(colors=TAG["chart"], line=dict(color=TAG["bg_dark"], width=1.5)),
+                    hovertemplate="<b>%{label}</b><br>R$ %{value:,.0f}<br>%{percent}<extra></extra>",
+                    pull=[0.02] * len(pie_data),
+                ))
+                fig.update_layout(**PLOTLY_LAYOUT, height=420, showlegend=False)
+                fig.update_layout(margin=dict(t=20, b=20, l=20, r=20))
+                st.plotly_chart(fig, use_container_width=True)
             with col2:
-                fund = st.selectbox("Fundo/Ativo", fund_names)
-            with col3:
-                value = st.number_input("Valor (R$)", min_value=0.01, step=10000.0, format="%.2f")
-            with col4:
-                request_date = st.date_input("Data Solicitação", value=datetime.today())
+                strat_col = find_col(ativos_com_caixa, "ESTRATÉGIA", "ESTRATEGIA")
+                if strat_col and strat_col in ativos_com_caixa.columns:
+                    st.subheader("Alocação por Estratégia")
+                    strat = ativos_com_caixa.groupby(strat_col)["FINANCEIRO"].sum().reset_index().sort_values("FINANCEIRO", ascending=True)
+                    fig2 = go.Figure(go.Bar(
+                        y=strat[strat_col], x=strat["FINANCEIRO"],
+                        orientation="h",
+                        marker_color=TAG["laranja"], marker_line_width=0,
+                        text=strat["FINANCEIRO"].apply(lambda v: f"R$ {v:,.0f}"),
+                        textposition="auto", textfont=dict(color=TAG["offwhite"], size=11),
+                        hovertemplate="<b>%{y}</b><br>R$ %{x:,.0f}<extra></extra>",
+                    ))
+                    fig2.update_layout(**PLOTLY_LAYOUT, height=420)
+                    fig2.update_layout(xaxis_title="Financeiro (R$)", yaxis_title="", margin=dict(l=140))
+                    st.plotly_chart(fig2, use_container_width=True)
 
-            col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
-            with col_btn1:
-                if st.button("➕ Adicionar", type="primary", use_container_width=True):
-                    fund_row = ativos[ativos["ATIVO"] == fund].iloc[0]
-                    fund_code = str(fund_row[cod_col]) if cod_col else None
+            # Provisões
+            if ctx["provision_movs"]:
+                st.divider()
+                display_provisions_summary(ctx["provision_movs"], expanded=False)
 
-                    # Validation
-                    if operation == "Resgate":
-                        fin_atual = float(fund_row.get("FINANCEIRO", 0))
-                        if value > fin_atual * 1.05:
-                            st.error(f"⚠️ Valor R$ {value:,.2f} > financeiro do ativo R$ {fin_atual:,.2f}")
-                            st.stop()
+        # ── TAB 2: Projeção ──
+        with tab_proj:
+            # ── Add manual movement inline ──
+            with st.expander("➕ Adicionar Movimento Manual", expanded=False):
+                fund_names = ativos["ATIVO"].tolist()
+                cod_col = ctx["cod_col"]
 
-                    mov = {
-                        "fund_name": fund, "fund_code": fund_code,
-                        "operation": operation, "value": value,
-                        "request_date": pd.Timestamp(request_date), "source": "manual",
-                    }
-                    liq_date, d_plus, matched = compute_liquidation_date_for_new_movement(mov, liquid_df)
-                    mov["liquidation_date"] = liq_date
-                    mov["description"] = f"{operation} manual - {fund[:40]}"
-                    st.session_state.new_movements.append(mov)
-                    st.success(f"✅ {operation} R$ {value:,.0f} em {fund[:30]} → Liq: {liq_date.strftime('%d/%m/%Y')} ({d_plus})")
-                    st.rerun()
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    operation = st.selectbox("Operação", ["Resgate", "Aplicação"])
+                with col2:
+                    fund = st.selectbox("Fundo/Ativo", fund_names)
+                with col3:
+                    value = st.number_input("Valor (R$)", min_value=0.01, step=10000.0, format="%.2f")
+                with col4:
+                    request_date = st.date_input("Data Solicitação", value=datetime.today())
 
-            with col_btn2:
-                if st.session_state.new_movements:
-                    if st.button("🗑️ Limpar Manuais", type="secondary", use_container_width=True):
-                        st.session_state.new_movements = []
+                col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
+                with col_btn1:
+                    if st.button("➕ Adicionar", type="primary", use_container_width=True):
+                        fund_row = ativos[ativos["ATIVO"] == fund].iloc[0]
+                        fund_code = str(fund_row[cod_col]) if cod_col else None
+
+                        # Validation
+                        if operation == "Resgate":
+                            fin_atual = float(fund_row.get("FINANCEIRO", 0))
+                            if value > fin_atual * 1.05:
+                                st.error(f"⚠️ Valor R$ {value:,.2f} > financeiro do ativo R$ {fin_atual:,.2f}")
+                                st.stop()
+
+                        mov = {
+                            "fund_name": fund, "fund_code": fund_code,
+                            "operation": operation, "value": value,
+                            "request_date": pd.Timestamp(request_date), "source": "manual",
+                        }
+                        liq_date, d_plus, matched = compute_liquidation_date_for_new_movement(mov, liquid_df)
+                        mov["liquidation_date"] = liq_date
+                        mov["description"] = f"{operation} manual - {fund[:40]}"
+                        st.session_state.new_movements.append(mov)
+                        st.success(f"✅ {operation} R$ {value:,.0f} em {fund[:30]} → Liq: {liq_date.strftime('%d/%m/%Y')} ({d_plus})")
                         st.rerun()
 
-        # Refresh after possible new movement
-        ctx = get_portfolio_context()
-        all_movements = ctx["all_movements"]
+                with col_btn2:
+                    if st.session_state.new_movements:
+                        if st.button("🗑️ Limpar Manuais", type="secondary", use_container_width=True):
+                            st.session_state.new_movements = []
+                            st.rerun()
 
-        if not all_movements:
-            st.info(
-                "📭 Nenhum movimento pendente (provisões). "
-                "Use o botão **➕ Adicionar Movimento Manual** acima para simular realocações."
-            )
+            # Refresh after possible new movement
+            ctx = get_portfolio_context()
+            all_movements = ctx["all_movements"]
 
-        if all_movements:
-            # Show categorized movements
-            display_provisions_summary(all_movements, expanded=False)
-
-            st.divider()
-
-            # Build evolution
-            df_fin, df_pct, df_mov = build_evolution_table(ativos, all_movements, caixa_initial)
-
-            if df_fin is not None:
-                date_cols = [c for c in df_fin.columns if c not in ["Ativo", "Código", "Atual (R$)"]]
-                display_evolution_tables(df_fin, df_pct, date_cols)
-
-                # Variation chart
-                st.divider()
-                st.subheader("Variação % PL: Hoje vs Última Data")
-                last_date_col = date_cols[-1] if date_cols else None
-                if last_date_col:
-                    chart_df = df_pct[~df_pct["Ativo"].isin(["📊 TOTAL PL"])].copy()
-                    chart_df = chart_df.sort_values("Atual (%)", ascending=True)
-                    fig = go.Figure()
-                    fig.add_trace(go.Bar(
-                        name="Hoje", y=chart_df["Ativo"], x=chart_df["Atual (%)"],
-                        orientation="h", marker_color=TAG["chart"][1], marker_line_width=0,
-                        text=chart_df["Atual (%)"].apply(lambda v: f"{v:.1f}%"),
-                        textposition="auto", textfont=dict(size=11, color=TAG["offwhite"]),
-                    ))
-                    fig.add_trace(go.Bar(
-                        name=last_date_col, y=chart_df["Ativo"], x=chart_df[last_date_col],
-                        orientation="h", marker_color=TAG["laranja"], marker_line_width=0,
-                        text=chart_df[last_date_col].apply(lambda v: f"{v:.1f}%"),
-                        textposition="auto", textfont=dict(size=11, color=TAG["offwhite"]),
-                    ))
-                    fig.update_layout(**PLOTLY_LAYOUT, barmode="group",
-                                      height=max(350, len(chart_df) * 40 + 80))
-                    fig.update_layout(
-                        xaxis_title="% PL", yaxis_title="",
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
-                                    bgcolor="rgba(0,0,0,0)"),
-                        margin=dict(l=160),
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-
-                # Timeline
-                st.subheader("Timeline de Liquidação")
-                timeline_data = df_mov[df_mov["Data Liquidação"] != ""].copy()
-                if not timeline_data.empty:
-                    timeline_data["Data Liquidação DT"] = pd.to_datetime(timeline_data["Data Liquidação"], dayfirst=True)
-
-                    op_colors = {
-                        "Resgate (Cotizando)": TAG["chart"][4],
-                        "Resgate Passivo": TAG["laranja"],
-                        "Débito/Passivo": TAG["chart"][6],
-                        "Crédito (Provisão)": TAG["chart"][5],
-                        "Resgate": TAG["vermelho_light"],
-                        "Aplicação": TAG["chart"][2],
-                    }
-
-                    # Group by liquidation date and show as vertical markers
-                    tl_grouped = timeline_data.groupby("Data Liquidação DT").agg(
-                        total=("Valor (R$)", "sum"),
-                        count=("Fundo", "count"),
-                        ops=("Operação", lambda x: ", ".join(x.unique())),
-                        details=("Fundo", lambda x: "<br>".join(
-                            f"• {f[:30]}" for f in x
-                        )),
-                    ).reset_index().sort_values("Data Liquidação DT")
-
-                    fig_tl = go.Figure()
-
-                    # Lollipop chart: stem + circle for each date
-                    for _, grp in tl_grouped.iterrows():
-                        main_op = grp["ops"].split(",")[0].strip()
-                        color = op_colors.get(main_op, TAG["chart"][0])
-                        fig_tl.add_trace(go.Scatter(
-                            x=[grp["Data Liquidação DT"], grp["Data Liquidação DT"]],
-                            y=[0, grp["total"]],
-                            mode="lines", line=dict(color=color, width=2),
-                            showlegend=False, hoverinfo="skip",
-                        ))
-                        fig_tl.add_trace(go.Scatter(
-                            x=[grp["Data Liquidação DT"]],
-                            y=[grp["total"]],
-                            mode="markers+text",
-                            marker=dict(size=14, color=color, line=dict(color=TAG["bg_dark"], width=1.5)),
-                            text=[f"R$ {grp['total']:,.0f}"],
-                            textposition="top center",
-                            textfont=dict(size=10, color=TAG["offwhite"]),
-                            showlegend=False,
-                            hovertemplate=(
-                                f"<b>{grp['Data Liquidação DT'].strftime('%d/%m/%Y')}</b><br>"
-                                f"{grp['count']} movimento(s)<br>"
-                                f"Total: R$ {grp['total']:,.0f}<br>"
-                                f"{grp['details']}<extra></extra>"
-                            ),
-                        ))
-
-                    fig_tl.update_layout(**PLOTLY_LAYOUT, height=350)
-                    fig_tl.update_layout(
-                        xaxis_title="Data de Liquidação", yaxis_title="Valor (R$)",
-                        showlegend=False,
-                    )
-                    st.plotly_chart(fig_tl, use_container_width=True)
-
-                # Export evolution
-                st.divider()
-                excel_data = export_to_excel(df_fin, df_pct, df_mov, carteira)
-                st.download_button(
-                    label="📥 Exportar para Excel",
-                    data=excel_data,
-                    file_name=f"projecao_carteira_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    type="primary",
+            if not all_movements:
+                st.info(
+                    "📭 Nenhum movimento pendente (provisões). "
+                    "Use o botão **➕ Adicionar Movimento Manual** acima para simular realocações."
                 )
 
-        # ── CASH FLOW TIMELINE (always shown, even without provisions) ──
-        st.divider()
-        st.subheader("📈 Fluxo de Caixa Diário")
-        st.caption(
-            "Projeção dia-a-dia do caixa efetivo (linha CAIXA + fundos com estratégia Caixa). "
-            "Cada componente é mostrado individualmente."
-        )
+            if all_movements:
+                # Show categorized movements
+                display_provisions_summary(all_movements, expanded=False)
 
-        cash_fund_codes = ctx.get("cash_fund_codes", set())
-        cash_details = ctx.get("cash_details", [])
+                st.divider()
 
-        # A. Cash fund identification
-        with st.expander("Fundos Considerados como Caixa (estratégia = Caixa)", expanded=False):
-            if cash_details:
-                df_cash = pd.DataFrame(cash_details)
-                total_cash_funds = df_cash["Financeiro (R$)"].sum()
-                st.metric("Caixa Efetivo Inicial",
-                          f"R$ {caixa_initial + total_cash_funds:,.0f}",
-                          f"CAIXA R$ {caixa_initial:,.0f} + Fundos Caixa R$ {total_cash_funds:,.0f}")
+                # Build evolution
+                df_fin, df_pct, df_mov = build_evolution_table(ativos, all_movements, caixa_initial)
+
+                if df_fin is not None:
+                    date_cols = [c for c in df_fin.columns if c not in ["Ativo", "Código", "Atual (R$)"]]
+                    display_evolution_tables(df_fin, df_pct, date_cols)
+
+                    # Variation chart
+                    st.divider()
+                    st.subheader("Variação % PL: Hoje vs Última Data")
+                    last_date_col = date_cols[-1] if date_cols else None
+                    if last_date_col:
+                        chart_df = df_pct[~df_pct["Ativo"].isin(["📊 TOTAL PL"])].copy()
+                        chart_df = chart_df.sort_values("Atual (%)", ascending=True)
+                        fig = go.Figure()
+                        fig.add_trace(go.Bar(
+                            name="Hoje", y=chart_df["Ativo"], x=chart_df["Atual (%)"],
+                            orientation="h", marker_color=TAG["chart"][1], marker_line_width=0,
+                            text=chart_df["Atual (%)"].apply(lambda v: f"{v:.1f}%"),
+                            textposition="auto", textfont=dict(size=11, color=TAG["offwhite"]),
+                        ))
+                        fig.add_trace(go.Bar(
+                            name=last_date_col, y=chart_df["Ativo"], x=chart_df[last_date_col],
+                            orientation="h", marker_color=TAG["laranja"], marker_line_width=0,
+                            text=chart_df[last_date_col].apply(lambda v: f"{v:.1f}%"),
+                            textposition="auto", textfont=dict(size=11, color=TAG["offwhite"]),
+                        ))
+                        fig.update_layout(**PLOTLY_LAYOUT, barmode="group",
+                                          height=max(350, len(chart_df) * 40 + 80))
+                        fig.update_layout(
+                            xaxis_title="% PL", yaxis_title="",
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                                        bgcolor="rgba(0,0,0,0)"),
+                            margin=dict(l=160),
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+
+                    # Timeline
+                    st.subheader("Timeline de Liquidação")
+                    timeline_data = df_mov[df_mov["Data Liquidação"] != ""].copy()
+                    if not timeline_data.empty:
+                        timeline_data["Data Liquidação DT"] = pd.to_datetime(timeline_data["Data Liquidação"], dayfirst=True)
+
+                        op_colors = {
+                            "Resgate (Cotizando)": TAG["chart"][4],
+                            "Resgate Passivo": TAG["laranja"],
+                            "Débito/Passivo": TAG["chart"][6],
+                            "Crédito (Provisão)": TAG["chart"][5],
+                            "Resgate": TAG["vermelho_light"],
+                            "Aplicação": TAG["chart"][2],
+                        }
+
+                        # Group by liquidation date and show as vertical markers
+                        tl_grouped = timeline_data.groupby("Data Liquidação DT").agg(
+                            total=("Valor (R$)", "sum"),
+                            count=("Fundo", "count"),
+                            ops=("Operação", lambda x: ", ".join(x.unique())),
+                            details=("Fundo", lambda x: "<br>".join(
+                                f"• {f[:30]}" for f in x
+                            )),
+                        ).reset_index().sort_values("Data Liquidação DT")
+
+                        fig_tl = go.Figure()
+
+                        # Lollipop chart: stem + circle for each date
+                        for _, grp in tl_grouped.iterrows():
+                            main_op = grp["ops"].split(",")[0].strip()
+                            color = op_colors.get(main_op, TAG["chart"][0])
+                            fig_tl.add_trace(go.Scatter(
+                                x=[grp["Data Liquidação DT"], grp["Data Liquidação DT"]],
+                                y=[0, grp["total"]],
+                                mode="lines", line=dict(color=color, width=2),
+                                showlegend=False, hoverinfo="skip",
+                            ))
+                            fig_tl.add_trace(go.Scatter(
+                                x=[grp["Data Liquidação DT"]],
+                                y=[grp["total"]],
+                                mode="markers+text",
+                                marker=dict(size=14, color=color, line=dict(color=TAG["bg_dark"], width=1.5)),
+                                text=[f"R$ {grp['total']:,.0f}"],
+                                textposition="top center",
+                                textfont=dict(size=10, color=TAG["offwhite"]),
+                                showlegend=False,
+                                hovertemplate=(
+                                    f"<b>{grp['Data Liquidação DT'].strftime('%d/%m/%Y')}</b><br>"
+                                    f"{grp['count']} movimento(s)<br>"
+                                    f"Total: R$ {grp['total']:,.0f}<br>"
+                                    f"{grp['details']}<extra></extra>"
+                                ),
+                            ))
+
+                        fig_tl.update_layout(**PLOTLY_LAYOUT, height=350)
+                        fig_tl.update_layout(
+                            xaxis_title="Data de Liquidação", yaxis_title="Valor (R$)",
+                            showlegend=False,
+                        )
+                        st.plotly_chart(fig_tl, use_container_width=True)
+
+                    # Export evolution
+                    st.divider()
+                    excel_data = export_to_excel(df_fin, df_pct, df_mov, carteira)
+                    st.download_button(
+                        label="📥 Exportar para Excel",
+                        data=excel_data,
+                        file_name=f"projecao_carteira_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        type="primary",
+                    )
+
+        # ── TAB 3: Fluxo de Caixa ──
+        with tab_cf:
+            st.subheader("📈 Fluxo de Caixa Diário")
+            st.caption(
+                "Projeção dia-a-dia do caixa efetivo (linha CAIXA + fundos com estratégia Caixa). "
+                "Cada componente é mostrado individualmente."
+            )
+
+            cash_fund_codes = ctx.get("cash_fund_codes", set())
+            cash_details = ctx.get("cash_details", [])
+
+            # A. Cash fund identification
+            with st.expander("Fundos Considerados como Caixa (estratégia = Caixa)", expanded=False):
+                if cash_details:
+                    df_cash = pd.DataFrame(cash_details)
+                    total_cash_funds = df_cash["Financeiro (R$)"].sum()
+                    st.metric("Caixa Efetivo Inicial",
+                              f"R$ {caixa_initial + total_cash_funds:,.0f}",
+                              f"CAIXA R$ {caixa_initial:,.0f} + Fundos Caixa R$ {total_cash_funds:,.0f}")
+                    st.dataframe(
+                        df_cash.style.format({"Financeiro (R$)": "R$ {:,.0f}"}),
+                        use_container_width=True, hide_index=True,
+                    )
+                else:
+                    st.info("Nenhum fundo com estratégia Caixa encontrado na carteira.")
+                    st.metric("Caixa Efetivo Inicial", f"R$ {caixa_initial:,.0f}")
+
+            # B. Run cash flow analysis
+            # If model is loaded, include plan movements in the timeline
+            cf_movements = list(all_movements)  # copy
+            plan_included = False
+            if st.session_state.get("model_loaded") and not st.session_state.model_df.empty:
+                model_df_cf = st.session_state.model_df
+                adh_cf, _ = build_adherence_analysis(ativos, model_df_cf, all_movements, caixa_initial, pl_total)
+                _, plan_movs_cf, _ = generate_smart_rebalancing_plan(
+                    adh_cf, liquid_df, all_movements, caixa_initial,
+                    ativos, cash_fund_codes, today=pd.Timestamp(datetime.today().date())
+                )
+                if plan_movs_cf:
+                    cf_movements = all_movements + plan_movs_cf
+                    plan_included = True
+
+            if cf_movements:
+                suggestions, negative_dates, df_timeline, initial_cash = suggest_request_dates(
+                    cf_movements, liquid_df, cash_fund_codes, caixa_initial, ativos
+                )
+            else:
+                # No movements at all — build minimal timeline to show initial state
+                df_timeline, initial_cash = build_cash_flow_timeline(
+                    caixa_initial, ativos, [], cash_fund_codes
+                )
+                suggestions, negative_dates = [], []
+
+            if plan_included:
+                st.info(
+                    f"Fluxo de caixa inclui {len(plan_movs_cf)} movimentos do plano de realocacao "
+                    f"(baseado na carteira modelo). Para detalhes, va em Carteira Modelo."
+                )
+            else:
+                if st.session_state.get("model_loaded"):
+                    st.caption("Modelo carregado mas sem movimentos gerados. Ajuste os % alvos para gerar movimentos.")
+                else:
+                    st.caption("Carregue uma carteira modelo para ver o impacto do rebalanceamento no caixa.")
+
+            # C. Alerts
+            if negative_dates:
+                st.error(
+                    f"ATENCAO: Caixa ficara negativo em "
+                    f"{len(negative_dates)} data(s)! O fundo nao pode operar assim."
+                )
+                for nd in negative_dates[:5]:
+                    st.warning(
+                        f"{nd['date'].strftime('%d/%m/%Y')} — "
+                        f"Saldo: R$ {nd['balance']:,.0f} — "
+                        f"Deficit: R$ {nd['shortfall']:,.0f}"
+                    )
+                if len(negative_dates) > 5:
+                    st.caption(f"... e mais {len(negative_dates) - 5} datas com saldo negativo.")
+            else:
+                if not df_timeline.empty:
+                    st.success("Fluxo de caixa positivo em todas as datas. Nenhum risco de caixa negativo.")
+
+            # D. Chart
+            if not df_timeline.empty:
+                fig_cf = build_cashflow_chart(df_timeline)
+                st.plotly_chart(fig_cf, use_container_width=True)
+
+            # E. Suggestions table
+            if suggestions:
+                st.divider()
+                st.subheader("📋 Sugestão de Datas de Solicitação")
+                st.caption(
+                    "Para evitar saldo negativo, solicite os resgates nas datas abaixo. "
+                    "O sistema calcula retroativamente com base no D+ de cada fundo."
+                )
+                df_sug = pd.DataFrame(suggestions)
+                display_cols = [
+                    "Fundo", "Código", "Operação", "Valor (R$)",
+                    "Data Atual", "Data Sugerida", "D+",
+                    "Cobre Saída Em", "Motivo",
+                ]
+                available_cols = [c for c in display_cols if c in df_sug.columns]
                 st.dataframe(
-                    df_cash.style.format({"Financeiro (R$)": "R$ {:,.0f}"}),
+                    df_sug[available_cols].style.format({"Valor (R$)": "R$ {:,.0f}"}).apply(
+                        lambda row: [
+                            "background-color: rgba(237,90,110,0.15)"
+                            if row.get("is_impossible", False) else ""
+                        ] * len(row), axis=1
+                    ) if "is_impossible" in df_sug.columns else df_sug[available_cols].style.format({"Valor (R$)": "R$ {:,.0f}"}),
                     use_container_width=True, hide_index=True,
                 )
-            else:
-                st.info("Nenhum fundo com estratégia Caixa encontrado na carteira.")
-                st.metric("Caixa Efetivo Inicial", f"R$ {caixa_initial:,.0f}")
 
-        # B. Run cash flow analysis
-        # If model is loaded, include plan movements in the timeline
-        cf_movements = list(all_movements)  # copy
-        plan_included = False
-        if st.session_state.get("model_loaded") and not st.session_state.model_df.empty:
-            model_df_cf = st.session_state.model_df
-            adh_cf, _ = build_adherence_analysis(ativos, model_df_cf, all_movements, caixa_initial, pl_total)
-            _, plan_movs_cf, _ = generate_smart_rebalancing_plan(
-                adh_cf, liquid_df, all_movements, caixa_initial,
-                ativos, cash_fund_codes, today=pd.Timestamp(datetime.today().date())
-            )
-            if plan_movs_cf:
-                cf_movements = all_movements + plan_movs_cf
-                plan_included = True
-
-        if cf_movements:
-            suggestions, negative_dates, df_timeline, initial_cash = suggest_request_dates(
-                cf_movements, liquid_df, cash_fund_codes, caixa_initial, ativos
-            )
-        else:
-            # No movements at all — build minimal timeline to show initial state
-            df_timeline, initial_cash = build_cash_flow_timeline(
-                caixa_initial, ativos, [], cash_fund_codes
-            )
-            suggestions, negative_dates = [], []
-
-        if plan_included:
-            st.info(
-                f"Fluxo de caixa inclui {len(plan_movs_cf)} movimentos do plano de realocacao "
-                f"(baseado na carteira modelo). Para detalhes, va em Carteira Modelo."
-            )
-        else:
-            if st.session_state.get("model_loaded"):
-                st.caption("Modelo carregado mas sem movimentos gerados. Ajuste os % alvos para gerar movimentos.")
-            else:
-                st.caption("Carregue uma carteira modelo para ver o impacto do rebalanceamento no caixa.")
-
-        # C. Alerts
-        if negative_dates:
-            st.error(
-                f"ATENCAO: Caixa ficara negativo em "
-                f"{len(negative_dates)} data(s)! O fundo nao pode operar assim."
-            )
-            for nd in negative_dates[:5]:
-                st.warning(
-                    f"{nd['date'].strftime('%d/%m/%Y')} — "
-                    f"Saldo: R$ {nd['balance']:,.0f} — "
-                    f"Deficit: R$ {nd['shortfall']:,.0f}"
-                )
-            if len(negative_dates) > 5:
-                st.caption(f"... e mais {len(negative_dates) - 5} datas com saldo negativo.")
-        else:
+            # F. Detailed timeline table
             if not df_timeline.empty:
-                st.success("Fluxo de caixa positivo em todas as datas. Nenhum risco de caixa negativo.")
-
-        # D. Chart
-        if not df_timeline.empty:
-            fig_cf = build_cashflow_chart(df_timeline)
-            st.plotly_chart(fig_cf, use_container_width=True)
-
-        # E. Suggestions table
-        if suggestions:
-            st.divider()
-            st.subheader("📋 Sugestão de Datas de Solicitação")
-            st.caption(
-                "Para evitar saldo negativo, solicite os resgates nas datas abaixo. "
-                "O sistema calcula retroativamente com base no D+ de cada fundo."
-            )
-            df_sug = pd.DataFrame(suggestions)
-            display_cols = [
-                "Fundo", "Código", "Operação", "Valor (R$)",
-                "Data Atual", "Data Sugerida", "D+",
-                "Cobre Saída Em", "Motivo",
-            ]
-            available_cols = [c for c in display_cols if c in df_sug.columns]
-            st.dataframe(
-                df_sug[available_cols].style.format({"Valor (R$)": "R$ {:,.0f}"}).apply(
-                    lambda row: [
-                        "background-color: rgba(237,90,110,0.15)"
-                        if row.get("is_impossible", False) else ""
-                    ] * len(row), axis=1
-                ) if "is_impossible" in df_sug.columns else df_sug[available_cols].style.format({"Valor (R$)": "R$ {:,.0f}"}),
-                use_container_width=True, hide_index=True,
-            )
-
-        # F. Detailed timeline table
-        if not df_timeline.empty:
-            with st.expander("📊 Detalhes do Fluxo de Caixa Diário", expanded=False):
-                display_tl = df_timeline[df_timeline["Tem Evento"] | (df_timeline.index == 0)].copy()
-                if display_tl.empty:
-                    display_tl = df_timeline.head(20)
-                display_tl["Data"] = display_tl["Data"].dt.strftime("%d/%m/%Y")
-                st.dataframe(
-                    display_tl[["Data", "Entradas (R$)", "Saídas (R$)", "Líquido (R$)", "Saldo (R$)", "Detalhes"]].style.format({
-                        "Entradas (R$)": "R$ {:,.0f}",
-                        "Saídas (R$)": "R$ {:,.0f}",
-                        "Líquido (R$)": "R$ {:,.0f}",
-                        "Saldo (R$)": "R$ {:,.0f}",
-                    }).apply(
-                        lambda row: [
-                            "background-color: rgba(237,90,110,0.15)" if row["Saldo (R$)"] < 0 else ""
-                        ] * len(row), axis=1
-                    ),
-                    use_container_width=True, hide_index=True, height=400,
-                )
+                with st.expander("📊 Detalhes do Fluxo de Caixa Diário", expanded=False):
+                    display_tl = df_timeline[df_timeline["Tem Evento"] | (df_timeline.index == 0)].copy()
+                    if display_tl.empty:
+                        display_tl = df_timeline.head(20)
+                    display_tl["Data"] = display_tl["Data"].dt.strftime("%d/%m/%Y")
+                    st.dataframe(
+                        display_tl[["Data", "Entradas (R$)", "Saídas (R$)", "Líquido (R$)", "Saldo (R$)", "Detalhes"]].style.format({
+                            "Entradas (R$)": "R$ {:,.0f}",
+                            "Saídas (R$)": "R$ {:,.0f}",
+                            "Líquido (R$)": "R$ {:,.0f}",
+                            "Saldo (R$)": "R$ {:,.0f}",
+                        }).apply(
+                            lambda row: [
+                                "background-color: rgba(237,90,110,0.15)" if row["Saldo (R$)"] < 0 else ""
+                            ] * len(row), axis=1
+                        ),
+                        use_container_width=True, hide_index=True, height=400,
+                    )
 
 
 # ═══════════════════════════════════════════════════════════
@@ -3103,8 +3113,8 @@ total nao muda (a operacao e **neutra**). Por isso o grafico mostra cada compone
                     )
                     st.plotly_chart(fig_gantt, use_container_width=True)
 
-            except Exception:
-                pass  # Non-critical visualization
+            except Exception as e:
+                st.warning(f"Erro ao gerar cronograma: {e}")
 
             st.divider()
 
