@@ -1533,7 +1533,8 @@ def generate_smart_rebalancing_plan(
 def build_cashflow_chart(df_timeline):
     """Build a clean cash flow chart from a timeline DataFrame. Returns a plotly Figure.
     Shows individual lines for each cash component (CAIXA + each cash fund).
-    Only plots event days (+ first/last) for a cleaner chart.
+    Focuses on event days only. If the initial balance dwarfs the rest,
+    it clips the Y-axis to the dynamic range and annotates the start value.
     """
     if df_timeline.empty:
         fig = go.Figure()
@@ -1576,7 +1577,7 @@ def build_cashflow_chart(df_timeline):
                 marker=dict(size=5, color=color),
                 hovertemplate=f"<b>{comp_name[:30]}</b><br>" + "%{x|%d/%m/%Y}<br>R$ %{y:,.0f}<extra></extra>",
             ))
-        # Total line (only when multiple components — not redundant)
+        # Total line (only when multiple components)
         fig.add_trace(go.Scatter(
             x=df_chart["Data"], y=df_chart["Saldo (R$)"],
             mode="lines", name="Total Caixa Efetivo",
@@ -1584,9 +1585,7 @@ def build_cashflow_chart(df_timeline):
             hovertemplate="<b>Total Caixa Efetivo</b><br>%{x|%d/%m/%Y}<br>R$ %{y:,.0f}<extra></extra>",
         ))
     elif single_comp:
-        # Only one component — show as main line (skip redundant total)
         col = comp_cols[0]
-        comp_name = col[1:]
         fig.add_trace(go.Scatter(
             x=df_chart["Data"], y=df_chart[col],
             mode="lines+markers", name="Caixa Efetivo",
@@ -1596,7 +1595,6 @@ def build_cashflow_chart(df_timeline):
             hovertemplate="<b>Caixa Efetivo</b><br>%{x|%d/%m/%Y}<br>R$ %{y:,.0f}<extra></extra>",
         ))
     else:
-        # No component columns — show total as main line
         fig.add_trace(go.Scatter(
             x=df_chart["Data"], y=df_chart["Saldo (R$)"],
             mode="lines+markers", name="Caixa Efetivo",
@@ -1623,30 +1621,35 @@ def build_cashflow_chart(df_timeline):
     # Zero reference line
     fig.add_hline(y=0, line_dash="dot", line_color="rgba(230,228,219,0.35)", line_width=1.5)
 
-    # ── Annotate key values ──
-    saldo_col = df_chart["Saldo (R$)"]
-    val_inicial = saldo_col.iloc[0]
-    val_min = saldo_col.min()
-    val_final = saldo_col.iloc[-1]
-    # Annotate initial value if it's much larger than the rest (spike)
-    if val_inicial > 0 and val_min >= 0 and val_inicial > val_min * 5:
+    # ── Smart Y-axis: detect if initial spike dwarfs the rest ──
+    saldo_vals = df_chart["Saldo (R$)"]
+    val_inicial = saldo_vals.iloc[0]
+    # Values AFTER the first point (the dynamic range)
+    vals_after_first = saldo_vals.iloc[1:] if len(saldo_vals) > 1 else saldo_vals
+    val_max_dynamic = vals_after_first.max() if not vals_after_first.empty else val_inicial
+    val_min_dynamic = vals_after_first.min() if not vals_after_first.empty else 0
+
+    # If initial value is >3x the max of subsequent values, zoom Y-axis to dynamic range
+    has_spike = (val_inicial > 0 and val_max_dynamic >= 0
+                 and val_inicial > max(val_max_dynamic, 1) * 3
+                 and len(saldo_vals) > 2)
+
+    y_range = None
+    if has_spike:
+        # Set Y range to show the dynamic data clearly, with 15% padding
+        y_padding = max(abs(val_max_dynamic), abs(val_min_dynamic), 1000) * 0.15
+        y_range = [
+            val_min_dynamic - y_padding,
+            val_max_dynamic + y_padding,
+        ]
+        # Annotate the initial spike (it will be clipped)
         fig.add_annotation(
-            x=df_chart["Data"].iloc[0], y=val_inicial,
-            text=f"Início: R$ {val_inicial:,.0f}",
-            showarrow=True, arrowhead=2, arrowcolor=TAG["offwhite"],
-            font=dict(size=10, color=TAG["offwhite"]),
-            bgcolor="rgba(42,21,32,0.8)", bordercolor=TAG["offwhite"], borderwidth=1,
-        )
-    # Annotate minimum value
-    if val_min < val_inicial * 0.5:
-        min_idx = saldo_col.idxmin()
-        fig.add_annotation(
-            x=df_chart.loc[min_idx, "Data"], y=val_min,
-            text=f"Mín: R$ {val_min:,.0f}",
-            showarrow=True, arrowhead=2, arrowcolor=TAG["laranja"],
-            font=dict(size=10, color=TAG["laranja"]),
-            bgcolor="rgba(42,21,32,0.8)", bordercolor=TAG["laranja"], borderwidth=1,
-            ay=-30,
+            x=df_chart["Data"].iloc[0], y=y_range[1] * 0.9,
+            text=f"▲ Início: R$ {val_inicial:,.0f}",
+            showarrow=False,
+            font=dict(size=11, color=TAG["offwhite"]),
+            bgcolor="rgba(99,13,36,0.85)", bordercolor=TAG["laranja"], borderwidth=1,
+            borderpad=4,
         )
 
     # Compute smart tick spacing based on date range
@@ -1673,11 +1676,11 @@ def build_cashflow_chart(df_timeline):
             dtick=_x_dtick,
             tickangle=-45,
             tickfont=dict(size=10),
-            rangeslider=dict(visible=True, thickness=0.06),
         ),
         yaxis=dict(
             tickformat=",.0f",
             tickprefix="R$ ",
+            range=y_range,  # None = auto, or zoomed to dynamic range
         ),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
                     bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
@@ -3075,9 +3078,10 @@ total nao muda (a operacao e **neutra**). Por isso o grafico mostra cada compone
                     )
 
                     fig_gantt = go.Figure()
+                    _epoch = pd.Timestamp("1970-01-01")
 
                     # Add one bar per row (horizontal Gantt)
-                    # NOTE: base must be ISO string to avoid pandas Timestamp+int error
+                    # Use epoch-ms for base+x to avoid pandas Timestamp+int error
                     for idx, row in df_gantt.iterrows():
                         inicio = pd.Timestamp(row["Início"])
                         fim = pd.Timestamp(row["Fim"])
@@ -3086,12 +3090,13 @@ total nao muda (a operacao e **neutra**). Por isso o grafico mostra cada compone
                             fim = inicio + timedelta(days=1)
 
                         duracao_dias = (fim - inicio).days
-                        duracao_ms = (fim - inicio).total_seconds() * 1000
+                        inicio_ms = int((inicio - _epoch).total_seconds() * 1000)
+                        duracao_ms = int((fim - inicio).total_seconds() * 1000)
 
                         fig_gantt.add_trace(go.Bar(
                             y=[row["Label"]],
                             x=[duracao_ms],
-                            base=[inicio.strftime("%Y-%m-%d")],
+                            base=[inicio_ms],
                             orientation="h",
                             marker_color=row["color"],
                             marker_line=dict(width=0.5, color=TAG["bg_dark"]),
@@ -3112,9 +3117,10 @@ total nao muda (a operacao e **neutra**). Por isso o grafico mostra cada compone
                             ),
                         ))
 
-                    # Add today line (use string date to avoid Timestamp issues)
+                    # Add today line (epoch-ms)
+                    today_ms = int((today_ts - _epoch).total_seconds() * 1000)
                     fig_gantt.add_vline(
-                        x=today_ts.strftime("%Y-%m-%d"), line_dash="dash",
+                        x=today_ms, line_dash="dash",
                         line_color=TAG["offwhite"], line_width=1.5,
                         annotation_text="Hoje",
                         annotation_font=dict(size=10, color=TAG["offwhite"]),
