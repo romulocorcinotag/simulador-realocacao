@@ -2168,27 +2168,43 @@ elif page == "📋 Posição Atual":
             with col4:
                 st.metric("Ativos", len(ativos))
 
-        # Table
+        # Table — include CAIXA as a row
         st.subheader("Ativos")
+        caixa_val = ctx["caixa_initial"]
+        pl_val = ctx["pl_total"]
         estrategia_col = find_col(ativos, "ESTRATÉGIA", "ESTRATEGIA")
         preco_col = find_col(ativos, "PREÇO", "PRECO")
+
+        # Build CAIXA row to prepend
+        caixa_row_data = {"ATIVO": "CAIXA", "FINANCEIRO": caixa_val}
+        if "% PL" in ativos.columns:
+            caixa_row_data["% PL"] = (caixa_val / pl_val * 100) if pl_val > 0 else 0
+        if estrategia_col and estrategia_col in ativos.columns:
+            caixa_row_data[estrategia_col] = "CAIXA"
+        if "CLASSE" in ativos.columns:
+            caixa_row_data["CLASSE"] = "Caixa"
+        caixa_row = pd.DataFrame([caixa_row_data])
+        ativos_com_caixa = pd.concat([caixa_row, ativos], ignore_index=True)
+
         display_col_candidates = [
             "ATIVO", "CLASSE", estrategia_col or "ESTRATÉGIA",
             "QUANTIDADE", preco_col or "PREÇO", "FINANCEIRO", "% PL",
         ]
-        available_cols = [c for c in display_col_candidates if c and c in ativos.columns]
-        df_display = ativos[available_cols].copy()
+        available_cols = [c for c in display_col_candidates if c and c in ativos_com_caixa.columns]
+        df_display = ativos_com_caixa[available_cols].copy()
         fmt = {"FINANCEIRO": "R$ {:,.2f}", "QUANTIDADE": "{:,.2f}", "% PL": "{:.2f}%"}
         if preco_col and preco_col in df_display.columns:
             fmt[preco_col] = "R$ {:,.6f}"
-        st.dataframe(df_display.style.format(fmt), use_container_width=True, hide_index=True, height=400)
+        st.dataframe(df_display.style.format(fmt, na_rep="—"), use_container_width=True, hide_index=True, height=400)
 
-        # Charts
+        # Charts — include CAIXA
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("Alocação por Ativo")
-            top_n = ativos.nlargest(10, "FINANCEIRO")
-            others = ativos[~ativos.index.isin(top_n.index)]
+            # Add CAIXA to pie data
+            pie_source = ativos_com_caixa[["ATIVO", "FINANCEIRO"]].copy()
+            top_n = pie_source.nlargest(10, "FINANCEIRO")
+            others = pie_source[~pie_source.index.isin(top_n.index)]
             if not others.empty:
                 others_row = pd.DataFrame([{"ATIVO": "Outros", "FINANCEIRO": others["FINANCEIRO"].sum()}])
                 pie_data = pd.concat([top_n[["ATIVO", "FINANCEIRO"]], others_row], ignore_index=True)
@@ -2206,10 +2222,10 @@ elif page == "📋 Posição Atual":
             fig.update_layout(margin=dict(t=20, b=20, l=20, r=20))
             st.plotly_chart(fig, use_container_width=True)
         with col2:
-            strat_col = find_col(ativos, "ESTRATÉGIA", "ESTRATEGIA")
-            if strat_col and strat_col in ativos.columns:
+            strat_col = find_col(ativos_com_caixa, "ESTRATÉGIA", "ESTRATEGIA")
+            if strat_col and strat_col in ativos_com_caixa.columns:
                 st.subheader("Alocação por Estratégia")
-                strat = ativos.groupby(strat_col)["FINANCEIRO"].sum().reset_index().sort_values("FINANCEIRO", ascending=True)
+                strat = ativos_com_caixa.groupby(strat_col)["FINANCEIRO"].sum().reset_index().sort_values("FINANCEIRO", ascending=True)
                 fig2 = go.Figure(go.Bar(
                     y=strat[strat_col], x=strat["FINANCEIRO"],
                     orientation="h",
