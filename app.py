@@ -2086,23 +2086,27 @@ if page == "📂 Importar Dados":
                 selected_fund = st.selectbox(
                     "Buscar ativo disponível",
                     options=[""] + fund_options,
-                    index=0,
                     placeholder="Digite para buscar...",
                     key="model_fund_search",
                 )
             with ac2:
                 new_pct = st.number_input("% Alvo", min_value=0.01, max_value=100.0, step=0.5, value=1.0, key="add_model_pct")
 
-            sel_code = ""
-            sel_name = ""
+            # Salvar seleção no session_state para persistir entre reruns
             if selected_fund and selected_fund in fund_lookup:
-                sel_code = fund_lookup[selected_fund]["code"]
-                sel_name = fund_lookup[selected_fund]["name"]
+                st.session_state["_model_add_code"] = fund_lookup[selected_fund]["code"]
+                st.session_state["_model_add_name"] = fund_lookup[selected_fund]["name"]
+            elif not selected_fund:
+                st.session_state.pop("_model_add_code", None)
+                st.session_state.pop("_model_add_name", None)
 
-            if selected_fund:
+            sel_code = st.session_state.get("_model_add_code", "")
+            sel_name = st.session_state.get("_model_add_name", "")
+
+            if sel_code:
                 st.caption(f"Selecionado: **{sel_name}** (Código: {sel_code})")
 
-            if st.button("Adicionar ao Modelo", type="primary", disabled=not selected_fund):
+            if st.button("Adicionar ao Modelo", type="primary"):
                 if not sel_code:
                     st.warning("Selecione um ativo na lista acima.")
                 elif sel_code in existing_codes:
@@ -2116,6 +2120,9 @@ if page == "📂 Importar Dados":
                     st.session_state.model_df = pd.concat(
                         [st.session_state.model_df, new_row], ignore_index=True
                     )
+                    # Limpar seleção após adicionar
+                    st.session_state.pop("_model_add_code", None)
+                    st.session_state.pop("_model_add_name", None)
                     st.rerun()
 
             # ── Gráfico ──
