@@ -1531,10 +1531,10 @@ def generate_smart_rebalancing_plan(
 # ─────────────────────────────────────────────────────────
 
 def build_cashflow_chart(df_timeline):
-    """Build a clean cash flow chart from a timeline DataFrame. Returns a plotly Figure.
-    Shows individual lines for each cash component (CAIXA + each cash fund).
-    Focuses on event days only. If the initial balance dwarfs the rest,
-    it clips the Y-axis to the dynamic range and annotates the start value.
+    """Build a cash flow chart: bars for daily inflows/outflows + line for running balance.
+    Shows only event days (days with actual movements).
+    Left Y-axis: movement bars (entradas/saídas).
+    Right Y-axis: running balance line.
     """
     if df_timeline.empty:
         fig = go.Figure()
@@ -1543,133 +1543,95 @@ def build_cashflow_chart(df_timeline):
                            font=dict(size=16, color=TAG["text_muted"]), xref="paper", yref="paper", x=0.5, y=0.5)
         return fig
 
-    # ── Filter to event days + first/last for cleaner chart ──
-    if len(df_timeline) > 15 and "Tem Evento" in df_timeline.columns:
-        mask = (
-            df_timeline["Tem Evento"]
-            | (df_timeline.index == df_timeline.index[0])
-            | (df_timeline.index == df_timeline.index[-1])
-        )
-        df_chart = df_timeline[mask].copy()
-        if len(df_chart) < 3:
-            df_chart = df_timeline.copy()
+    # Only show event days (days with actual movements)
+    if "Tem Evento" in df_timeline.columns:
+        df_events = df_timeline[df_timeline["Tem Evento"]].copy()
     else:
-        df_chart = df_timeline.copy()
+        df_events = df_timeline[
+            (df_timeline["Entradas (R$)"] > 0) | (df_timeline["Saídas (R$)"] > 0)
+        ].copy()
 
-    fig = go.Figure()
+    if df_events.empty:
+        fig = go.Figure()
+        fig.update_layout(**PLOTLY_LAYOUT, height=300)
+        fig.add_annotation(text="Nenhum movimento no período", showarrow=False,
+                           font=dict(size=16, color=TAG["text_muted"]), xref="paper", yref="paper", x=0.5, y=0.5)
+        return fig
 
-    # Component columns start with "_" (e.g. "_Linha CAIXA", "_FundName")
-    comp_cols = [c for c in df_chart.columns if c.startswith("_")]
-    single_comp = len(comp_cols) == 1
+    from plotly.subplots import make_subplots
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-    # ── Individual line per component ──
-    if comp_cols and len(comp_cols) > 1:
-        colors_comp = [TAG["chart"][0], TAG["chart"][5], TAG["chart"][2],
-                       TAG["chart"][3], TAG["chart"][6], TAG["chart"][7],
-                       TAG["chart"][1], TAG["chart"][8]]
-        for idx, col in enumerate(comp_cols):
-            comp_name = col[1:]  # remove leading _
-            color = colors_comp[idx % len(colors_comp)]
-            fig.add_trace(go.Scatter(
-                x=df_chart["Data"], y=df_chart[col],
-                mode="lines+markers", name=comp_name[:30],
-                line=dict(color=color, width=2.5),
-                marker=dict(size=5, color=color),
-                hovertemplate=f"<b>{comp_name[:30]}</b><br>" + "%{x|%d/%m/%Y}<br>R$ %{y:,.0f}<extra></extra>",
-            ))
-        # Total line (only when multiple components)
+    # Format dates as strings for categorical x-axis (cleaner bars)
+    date_labels = df_events["Data"].dt.strftime("%d/%m/%Y").tolist()
+
+    # ── Bars: Entradas (green, positive) ──
+    fig.add_trace(go.Bar(
+        x=date_labels, y=df_events["Entradas (R$)"],
+        name="Entradas",
+        marker_color=TAG["chart"][2],
+        marker_line_width=0,
+        text=df_events["Entradas (R$)"].apply(lambda v: f"R$ {v:,.0f}" if v > 0 else ""),
+        textposition="outside", textfont=dict(size=9, color=TAG["chart"][2]),
+        hovertemplate="<b>%{x}</b><br>Entrada: R$ %{y:,.0f}<extra></extra>",
+    ), secondary_y=False)
+
+    # ── Bars: Saídas (red, negative for visual) ──
+    fig.add_trace(go.Bar(
+        x=date_labels, y=-df_events["Saídas (R$)"],
+        name="Saídas",
+        marker_color=TAG["chart"][4],
+        marker_line_width=0,
+        text=df_events["Saídas (R$)"].apply(lambda v: f"-R$ {v:,.0f}" if v > 0 else ""),
+        textposition="outside", textfont=dict(size=9, color=TAG["chart"][4]),
+        hovertemplate="<b>%{x}</b><br>Saída: R$ %{customdata:,.0f}<extra></extra>",
+        customdata=df_events["Saídas (R$)"],
+    ), secondary_y=False)
+
+    # ── Line: Saldo acumulado (right Y-axis) ──
+    fig.add_trace(go.Scatter(
+        x=date_labels, y=df_events["Saldo (R$)"],
+        name="Saldo Caixa",
+        mode="lines+markers",
+        line=dict(color=TAG["offwhite"], width=2.5),
+        marker=dict(size=6, color=TAG["offwhite"]),
+        hovertemplate="<b>%{x}</b><br>Saldo: R$ %{y:,.0f}<extra></extra>",
+    ), secondary_y=True)
+
+    # ── Deficit markers ──
+    neg_events = df_events[df_events["Saldo (R$)"] < 0]
+    if not neg_events.empty:
+        neg_labels = neg_events["Data"].dt.strftime("%d/%m/%Y").tolist()
         fig.add_trace(go.Scatter(
-            x=df_chart["Data"], y=df_chart["Saldo (R$)"],
-            mode="lines", name="Total Caixa Efetivo",
-            line=dict(color=TAG["offwhite"], width=3, dash="dot"),
-            hovertemplate="<b>Total Caixa Efetivo</b><br>%{x|%d/%m/%Y}<br>R$ %{y:,.0f}<extra></extra>",
-        ))
-    elif single_comp:
-        col = comp_cols[0]
-        fig.add_trace(go.Scatter(
-            x=df_chart["Data"], y=df_chart[col],
-            mode="lines+markers", name="Caixa Efetivo",
-            line=dict(color=TAG["chart"][0], width=2.5),
-            marker=dict(size=5, color=TAG["chart"][0]),
-            fill="tozeroy", fillcolor="rgba(255,136,83,0.10)",
-            hovertemplate="<b>Caixa Efetivo</b><br>%{x|%d/%m/%Y}<br>R$ %{y:,.0f}<extra></extra>",
-        ))
-    else:
-        fig.add_trace(go.Scatter(
-            x=df_chart["Data"], y=df_chart["Saldo (R$)"],
-            mode="lines+markers", name="Caixa Efetivo",
-            line=dict(color=TAG["chart"][2], width=2.5),
-            marker=dict(size=5, color=TAG["chart"][2]),
-            fill="tozeroy", fillcolor="rgba(107,222,151,0.10)",
-            hovertemplate="<b>%{x|%d/%m/%Y}</b><br>Saldo: R$ %{y:,.0f}<extra></extra>",
-        ))
+            x=neg_labels, y=neg_events["Saldo (R$)"],
+            name="Deficit",
+            mode="markers",
+            marker=dict(size=12, color=TAG["chart"][4], symbol="x", line=dict(width=2)),
+            hovertemplate="<b>DEFICIT</b><br>%{x}<br>R$ %{y:,.0f}<extra></extra>",
+        ), secondary_y=True)
 
-    # Deficit markers
-    neg_days = df_chart[df_chart["Saldo (R$)"] < 0]
-    if not neg_days.empty:
-        neg_hover = [
-            f"<b>DEFICIT</b><br>{d.strftime('%d/%m/%Y')}<br>R$ {s:,.0f}<extra></extra>"
-            for d, s in zip(neg_days["Data"], neg_days["Saldo (R$)"])
-        ]
-        fig.add_trace(go.Scatter(
-            x=neg_days["Data"], y=neg_days["Saldo (R$)"],
-            mode="markers", name="Deficit",
-            marker=dict(size=10, color=TAG["chart"][4], symbol="x", line=dict(width=2)),
-            hovertemplate=neg_hover,
-        ))
+    # Zero line on right axis
+    fig.add_hline(y=0, line_dash="dot", line_color="rgba(230,228,219,0.25)", line_width=1,
+                  secondary_y=True)
 
-    # Zero reference line
-    fig.add_hline(y=0, line_dash="dot", line_color="rgba(230,228,219,0.35)", line_width=1.5)
-
-    # ── Smart Y-axis: detect if initial spike dwarfs the rest ──
-    saldo_vals = df_chart["Saldo (R$)"]
-    val_inicial = saldo_vals.iloc[0]
-    # Values AFTER the first point (the dynamic range)
-    vals_after_first = saldo_vals.iloc[1:] if len(saldo_vals) > 1 else saldo_vals
-    val_max_dynamic = vals_after_first.max() if not vals_after_first.empty else val_inicial
-    val_min_dynamic = vals_after_first.min() if not vals_after_first.empty else 0
-
-    # If initial value is >3x the max of subsequent values, zoom Y-axis to dynamic range
-    has_spike = (val_inicial > 0 and val_max_dynamic >= 0
-                 and val_inicial > max(val_max_dynamic, 1) * 3
-                 and len(saldo_vals) > 2)
-
-    y_range = None
-    if has_spike:
-        # Set Y range to show the dynamic data clearly, with 15% padding
-        y_padding = max(abs(val_max_dynamic), abs(val_min_dynamic), 1000) * 0.15
-        y_range = [
-            val_min_dynamic - y_padding,
-            val_max_dynamic + y_padding,
-        ]
-        # Annotate the initial spike (it will be clipped)
-        fig.add_annotation(
-            x=df_chart["Data"].iloc[0], y=y_range[1] * 0.9,
-            text=f"▲ Início: R$ {val_inicial:,.0f}",
-            showarrow=False,
-            font=dict(size=11, color=TAG["offwhite"]),
-            bgcolor="rgba(99,13,36,0.85)", bordercolor=TAG["laranja"], borderwidth=1,
-            borderpad=4,
-        )
-
-    fig.update_layout(**PLOTLY_LAYOUT, height=450)
+    fig.update_layout(**PLOTLY_LAYOUT, height=420)
     fig.update_layout(
-        xaxis_title="", yaxis_title="Saldo (R$)",
-        xaxis=dict(
-            tickformat="%d/%m/%Y",
-            nticks=12,
-            tickangle=-45,
-            tickfont=dict(size=10),
-        ),
-        yaxis=dict(
-            tickformat=",.0f",
-            tickprefix="R$ ",
-            range=y_range,  # None = auto, or zoomed to dynamic range
-        ),
+        barmode="relative",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
                     bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
-        dragmode="zoom",
         hovermode="x unified",
+        margin=dict(b=80),
+    )
+    fig.update_xaxes(
+        tickangle=-45, tickfont=dict(size=9),
+        categoryorder="array", categoryarray=date_labels,
+    )
+    fig.update_yaxes(
+        title_text="Movimentos (R$)", tickformat=",.0f", tickprefix="R$ ",
+        secondary_y=False,
+    )
+    fig.update_yaxes(
+        title_text="Saldo Acumulado (R$)", tickformat=",.0f", tickprefix="R$ ",
+        secondary_y=True,
     )
     return fig
 
@@ -2470,8 +2432,8 @@ elif page == "📊 Carteira":
         with tab_cf:
             st.subheader("📈 Fluxo de Caixa Diário")
             st.caption(
-                "Projeção dia-a-dia do caixa efetivo (linha CAIXA + fundos com estratégia Caixa). "
-                "Cada componente é mostrado individualmente."
+                "Barras verdes = entradas no caixa (resgates). Barras vermelhas = saídas (aplicações/passivos). "
+                "Linha branca = saldo acumulado do caixa (eixo direito)."
             )
 
             cash_fund_codes = ctx.get("cash_fund_codes", set())
@@ -3318,12 +3280,23 @@ total nao muda (a operacao e **neutra**). Por isso o grafico mostra cada compone
                     st.success("Plano viavel! Caixa positivo em todas as datas.")
 
             st.caption(
-                "Cada linha mostra o saldo de um componente de caixa ao longo do tempo. "
-                "Quando voce aplica em um fundo caixa, a linha CAIXA desce e a linha do fundo sobe. "
-                "A linha pontilhada branca mostra o total (soma de todos os componentes)."
+                "Barras verdes = entradas no caixa (resgates). Barras vermelhas = saídas (aplicações/passivos). "
+                "Linha branca = saldo acumulado do caixa (eixo direito)."
             )
 
             if not tl_plan.empty:
+                # Key cash metrics
+                _saldo_vals = tl_plan["Saldo (R$)"]
+                _cx_ini = _saldo_vals.iloc[0]
+                _cx_min = _saldo_vals.min()
+                _cx_fin = _saldo_vals.iloc[-1]
+                _cx1, _cx2, _cx3 = st.columns(3)
+                _cx1.metric("Caixa Inicial", f"R$ {_cx_ini:,.0f}")
+                _cx2.metric("Caixa Mínimo", f"R$ {_cx_min:,.0f}",
+                            delta=f"R$ {_cx_min - _cx_ini:,.0f}", delta_color="inverse")
+                _cx3.metric("Caixa Final", f"R$ {_cx_fin:,.0f}",
+                            delta=f"R$ {_cx_fin - _cx_ini:,.0f}", delta_color="inverse")
+
                 fig_plan = build_cashflow_chart(tl_plan)
                 st.plotly_chart(fig_plan, use_container_width=True)
 
