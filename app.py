@@ -2095,31 +2095,30 @@ if page == "📂 Importar Dados":
                 sel_code = fund_lookup[selected_fund]["code"]
                 sel_name = fund_lookup[selected_fund]["name"]
 
-            with st.form("add_model_asset", clear_on_submit=True):
-                ac1, ac2, ac3 = st.columns([1, 2, 1])
-                new_code = ac1.text_input("Código", value=sel_code)
-                new_name = ac2.text_input("Nome do Ativo", value=sel_name)
-                new_pct = ac3.number_input("% Alvo", min_value=0.0, max_value=100.0, step=0.5, value=0.0)
+            ac1, ac2, ac3 = st.columns([1, 2, 1])
+            new_code = ac1.text_input("Código", value=sel_code, key="add_model_code")
+            new_name = ac2.text_input("Nome do Ativo", value=sel_name, key="add_model_name")
+            new_pct = ac3.number_input("% Alvo", min_value=0.01, max_value=100.0, step=0.5, value=1.0, key="add_model_pct")
 
-                submitted = st.form_submit_button("Adicionar ao Modelo", type="primary")
-                if submitted:
-                    if new_pct <= 0:
-                        st.warning("Informe um % Alvo maior que zero.")
-                    elif not new_name.strip():
-                        st.warning("Informe o nome do ativo.")
+            if st.button("Adicionar ao Modelo", type="primary"):
+                if new_pct <= 0:
+                    st.warning("Informe um % Alvo maior que zero.")
+                elif not new_name.strip():
+                    st.warning("Informe o nome do ativo.")
+                else:
+                    code_clean = new_code.strip()
+                    if code_clean in existing_codes and code_clean:
+                        st.warning(f"Código {code_clean} já existe no modelo. Altere o % Alvo na tabela acima.")
                     else:
                         new_row = pd.DataFrame([{
-                            "Código": new_code.strip(),
+                            "Código": code_clean,
                             "Ativo": new_name.strip(),
                             "% Alvo": new_pct,
                         }])
-                        if new_code.strip() in existing_codes and new_code.strip():
-                            st.warning(f"Código {new_code} já existe no modelo. Altere o % Alvo na tabela acima.")
-                        else:
-                            st.session_state.model_df = pd.concat(
-                                [st.session_state.model_df, new_row], ignore_index=True
-                            )
-                            st.rerun()
+                        st.session_state.model_df = pd.concat(
+                            [st.session_state.model_df, new_row], ignore_index=True
+                        )
+                        st.rerun()
 
             # ── Gráfico ──
             if not model_df.empty:
