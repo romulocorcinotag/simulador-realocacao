@@ -1533,7 +1533,7 @@ def generate_smart_rebalancing_plan(
 def build_cashflow_chart(df_timeline):
     """Build a clean cash flow chart from a timeline DataFrame. Returns a plotly Figure.
     Shows individual lines for each cash component (CAIXA + each cash fund).
-    Each component is shown as its OWN line (not stacked) so you can see the actual value.
+    Only plots event days (+ first/last) for a cleaner chart.
     """
     if df_timeline.empty:
         fig = go.Figure()
@@ -1542,12 +1542,26 @@ def build_cashflow_chart(df_timeline):
                            font=dict(size=16, color=TAG["text_muted"]), xref="paper", yref="paper", x=0.5, y=0.5)
         return fig
 
+    # ── Filter to event days + first/last for cleaner chart ──
+    if len(df_timeline) > 15 and "Tem Evento" in df_timeline.columns:
+        mask = (
+            df_timeline["Tem Evento"]
+            | (df_timeline.index == df_timeline.index[0])
+            | (df_timeline.index == df_timeline.index[-1])
+        )
+        df_chart = df_timeline[mask].copy()
+        if len(df_chart) < 3:
+            df_chart = df_timeline.copy()
+    else:
+        df_chart = df_timeline.copy()
+
     fig = go.Figure()
 
     # Component columns start with "_" (e.g. "_Linha CAIXA", "_FundName")
-    comp_cols = [c for c in df_timeline.columns if c.startswith("_")]
+    comp_cols = [c for c in df_chart.columns if c.startswith("_")]
+    single_comp = len(comp_cols) == 1
 
-    # ── Individual line per component (NOT stacked — shows real values) ──
+    # ── Individual line per component ──
     if comp_cols and len(comp_cols) > 1:
         colors_comp = [TAG["chart"][0], TAG["chart"][5], TAG["chart"][2],
                        TAG["chart"][3], TAG["chart"][6], TAG["chart"][7],
@@ -1555,50 +1569,46 @@ def build_cashflow_chart(df_timeline):
         for idx, col in enumerate(comp_cols):
             comp_name = col[1:]  # remove leading _
             color = colors_comp[idx % len(colors_comp)]
-            # Each component: solid line with markers
             fig.add_trace(go.Scatter(
-                x=df_timeline["Data"], y=df_timeline[col],
+                x=df_chart["Data"], y=df_chart[col],
                 mode="lines+markers", name=comp_name[:30],
-                line=dict(color=color, width=2.5, shape="hv"),
-                marker=dict(size=4, color=color),
+                line=dict(color=color, width=2.5),
+                marker=dict(size=5, color=color),
                 hovertemplate=f"<b>{comp_name[:30]}</b><br>" + "%{x|%d/%m/%Y}<br>R$ %{y:,.0f}<extra></extra>",
             ))
-    elif comp_cols and len(comp_cols) == 1:
-        # Only one component — show it directly
+        # Total line (only when multiple components — not redundant)
+        fig.add_trace(go.Scatter(
+            x=df_chart["Data"], y=df_chart["Saldo (R$)"],
+            mode="lines", name="Total Caixa Efetivo",
+            line=dict(color=TAG["offwhite"], width=3, dash="dot"),
+            hovertemplate="<b>Total Caixa Efetivo</b><br>%{x|%d/%m/%Y}<br>R$ %{y:,.0f}<extra></extra>",
+        ))
+    elif single_comp:
+        # Only one component — show as main line (skip redundant total)
         col = comp_cols[0]
         comp_name = col[1:]
         fig.add_trace(go.Scatter(
-            x=df_timeline["Data"], y=df_timeline[col],
-            mode="lines+markers", name=comp_name[:30],
-            line=dict(color=TAG["chart"][0], width=2.5, shape="hv"),
-            marker=dict(size=4, color=TAG["chart"][0]),
-            fill="tozeroy", fillcolor="rgba(255,136,83,0.08)",
-            hovertemplate=f"<b>{comp_name[:30]}</b><br>" + "%{x|%d/%m/%Y}<br>R$ %{y:,.0f}<extra></extra>",
-        ))
-
-    # Total effective cash line (always on top, dashed white — the sum of all components)
-    fig.add_trace(go.Scatter(
-        x=df_timeline["Data"], y=df_timeline["Saldo (R$)"],
-        mode="lines", name="Total Caixa Efetivo",
-        line=dict(color=TAG["offwhite"], width=3, dash="dot", shape="hv"),
-        hovertemplate="<b>Total Caixa Efetivo</b><br>%{x|%d/%m/%Y}<br>R$ %{y:,.0f}<extra></extra>",
-    ))
-
-    # If there are no component columns, show total as the main line
-    if not comp_cols:
-        fig.add_trace(go.Scatter(
-            x=df_timeline["Data"], y=df_timeline["Saldo (R$)"],
+            x=df_chart["Data"], y=df_chart[col],
             mode="lines+markers", name="Caixa Efetivo",
-            line=dict(color=TAG["chart"][2], width=2.5, shape="hv"),
-            marker=dict(size=4, color=TAG["chart"][2]),
-            fill="tozeroy", fillcolor="rgba(107,222,151,0.08)",
+            line=dict(color=TAG["chart"][0], width=2.5),
+            marker=dict(size=5, color=TAG["chart"][0]),
+            fill="tozeroy", fillcolor="rgba(255,136,83,0.10)",
+            hovertemplate="<b>Caixa Efetivo</b><br>%{x|%d/%m/%Y}<br>R$ %{y:,.0f}<extra></extra>",
+        ))
+    else:
+        # No component columns — show total as main line
+        fig.add_trace(go.Scatter(
+            x=df_chart["Data"], y=df_chart["Saldo (R$)"],
+            mode="lines+markers", name="Caixa Efetivo",
+            line=dict(color=TAG["chart"][2], width=2.5),
+            marker=dict(size=5, color=TAG["chart"][2]),
+            fill="tozeroy", fillcolor="rgba(107,222,151,0.10)",
             hovertemplate="<b>%{x|%d/%m/%Y}</b><br>Saldo: R$ %{y:,.0f}<extra></extra>",
         ))
 
     # Deficit markers
-    neg_vals = df_timeline["Saldo (R$)"].clip(upper=0)
-    if (neg_vals < 0).any():
-        neg_days = df_timeline[df_timeline["Saldo (R$)"] < 0]
+    neg_days = df_chart[df_chart["Saldo (R$)"] < 0]
+    if not neg_days.empty:
         neg_hover = [
             f"<b>DEFICIT</b><br>{d.strftime('%d/%m/%Y')}<br>R$ {s:,.0f}<extra></extra>"
             for d, s in zip(neg_days["Data"], neg_days["Saldo (R$)"])
@@ -1613,8 +1623,34 @@ def build_cashflow_chart(df_timeline):
     # Zero reference line
     fig.add_hline(y=0, line_dash="dot", line_color="rgba(230,228,219,0.35)", line_width=1.5)
 
+    # ── Annotate key values ──
+    saldo_col = df_chart["Saldo (R$)"]
+    val_inicial = saldo_col.iloc[0]
+    val_min = saldo_col.min()
+    val_final = saldo_col.iloc[-1]
+    # Annotate initial value if it's much larger than the rest (spike)
+    if val_inicial > 0 and val_min >= 0 and val_inicial > val_min * 5:
+        fig.add_annotation(
+            x=df_chart["Data"].iloc[0], y=val_inicial,
+            text=f"Início: R$ {val_inicial:,.0f}",
+            showarrow=True, arrowhead=2, arrowcolor=TAG["offwhite"],
+            font=dict(size=10, color=TAG["offwhite"]),
+            bgcolor="rgba(42,21,32,0.8)", bordercolor=TAG["offwhite"], borderwidth=1,
+        )
+    # Annotate minimum value
+    if val_min < val_inicial * 0.5:
+        min_idx = saldo_col.idxmin()
+        fig.add_annotation(
+            x=df_chart.loc[min_idx, "Data"], y=val_min,
+            text=f"Mín: R$ {val_min:,.0f}",
+            showarrow=True, arrowhead=2, arrowcolor=TAG["laranja"],
+            font=dict(size=10, color=TAG["laranja"]),
+            bgcolor="rgba(42,21,32,0.8)", bordercolor=TAG["laranja"], borderwidth=1,
+            ay=-30,
+        )
+
     # Compute smart tick spacing based on date range
-    _dates = df_timeline["Data"]
+    _dates = df_chart["Data"]
     _date_range_days = (_dates.max() - _dates.min()).days if len(_dates) > 1 else 1
     if _date_range_days <= 14:
         _x_dtick = "D1"
@@ -1637,6 +1673,7 @@ def build_cashflow_chart(df_timeline):
             dtick=_x_dtick,
             tickangle=-45,
             tickfont=dict(size=10),
+            rangeslider=dict(visible=True, thickness=0.06),
         ),
         yaxis=dict(
             tickformat=",.0f",
@@ -3040,19 +3077,21 @@ total nao muda (a operacao e **neutra**). Por isso o grafico mostra cada compone
                     fig_gantt = go.Figure()
 
                     # Add one bar per row (horizontal Gantt)
+                    # NOTE: base must be ISO string to avoid pandas Timestamp+int error
                     for idx, row in df_gantt.iterrows():
-                        inicio = row["Início"]
-                        fim = row["Fim"]
+                        inicio = pd.Timestamp(row["Início"])
+                        fim = pd.Timestamp(row["Fim"])
                         # Ensure bar has at least 1 day width for visibility
                         if fim <= inicio:
                             fim = inicio + timedelta(days=1)
 
                         duracao_dias = (fim - inicio).days
+                        duracao_ms = (fim - inicio).total_seconds() * 1000
 
                         fig_gantt.add_trace(go.Bar(
                             y=[row["Label"]],
-                            x=[(fim - inicio).total_seconds() * 1000],  # width in ms
-                            base=[inicio],
+                            x=[duracao_ms],
+                            base=[inicio.strftime("%Y-%m-%d")],
                             orientation="h",
                             marker_color=row["color"],
                             marker_line=dict(width=0.5, color=TAG["bg_dark"]),
@@ -3065,7 +3104,7 @@ total nao muda (a operacao e **neutra**). Por isso o grafico mostra cada compone
                                 f"<b>{row['Ativo']}</b><br>"
                                 f"Operacao: {row['Operação']}<br>"
                                 f"Solicitacao: {inicio.strftime('%d/%m/%Y')}<br>"
-                                f"Liquidacao: {row['Fim'].strftime('%d/%m/%Y')}<br>"
+                                f"Liquidacao: {fim.strftime('%d/%m/%Y')}<br>"
                                 f"Prazo: {duracao_dias} dias<br>"
                                 f"Valor: R$ {row['Valor']:,.0f}<br>"
                                 f"{row['D+']}"
@@ -3073,9 +3112,9 @@ total nao muda (a operacao e **neutra**). Por isso o grafico mostra cada compone
                             ),
                         ))
 
-                    # Add today line
+                    # Add today line (use string date to avoid Timestamp issues)
                     fig_gantt.add_vline(
-                        x=today_ts, line_dash="dash",
+                        x=today_ts.strftime("%Y-%m-%d"), line_dash="dash",
                         line_color=TAG["offwhite"], line_width=1.5,
                         annotation_text="Hoje",
                         annotation_font=dict(size=10, color=TAG["offwhite"]),
