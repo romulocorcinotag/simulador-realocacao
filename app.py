@@ -1652,28 +1652,12 @@ def build_cashflow_chart(df_timeline):
             borderpad=4,
         )
 
-    # Compute smart tick spacing based on date range
-    _dates = df_chart["Data"]
-    _date_range_days = (_dates.max() - _dates.min()).days if len(_dates) > 1 else 1
-    if _date_range_days <= 14:
-        _x_dtick = "D1"
-        _x_fmt = "%d/%m"
-    elif _date_range_days <= 60:
-        _x_dtick = "D7"
-        _x_fmt = "%d/%m"
-    elif _date_range_days <= 180:
-        _x_dtick = "M1"
-        _x_fmt = "%b/%y"
-    else:
-        _x_dtick = "M2"
-        _x_fmt = "%b/%y"
-
     fig.update_layout(**PLOTLY_LAYOUT, height=450)
     fig.update_layout(
         xaxis_title="", yaxis_title="Saldo (R$)",
         xaxis=dict(
-            tickformat=_x_fmt,
-            dtick=_x_dtick,
+            tickformat="%d/%m/%Y",
+            nticks=12,
             tickangle=-45,
             tickfont=dict(size=10),
         ),
@@ -3147,8 +3131,11 @@ total nao muda (a operacao e **neutra**). Por isso o grafico mostra cada compone
                     fig_gantt.update_layout(**PLOTLY_LAYOUT, height=max(350, n_rows * 38 + 100))
                     fig_gantt.update_layout(
                         xaxis=dict(
-                            type="date", tickformat="%d/%m",
-                            title="", dtick="D7", tickangle=-45,
+                            type="date", tickformat="%d/%m/%Y",
+                            title="",
+                            dtick=7 * 24 * 60 * 60 * 1000,  # 7 days in ms
+                            tickangle=-45,
+                            tickfont=dict(size=10),
                         ),
                         yaxis=dict(title="", autorange="reversed"),
                         barmode="overlay",
