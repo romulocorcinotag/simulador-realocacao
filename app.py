@@ -2081,13 +2081,17 @@ if page == "📂 Importar Dados":
                 fund_options.append(display)
                 fund_lookup[display] = {"code": code, "name": name}
 
-            selected_fund = st.selectbox(
-                "Buscar ativo disponível",
-                options=[""] + fund_options,
-                index=0,
-                placeholder="Digite para buscar...",
-                key="model_fund_search",
-            )
+            ac1, ac2 = st.columns([3, 1])
+            with ac1:
+                selected_fund = st.selectbox(
+                    "Buscar ativo disponível",
+                    options=[""] + fund_options,
+                    index=0,
+                    placeholder="Digite para buscar...",
+                    key="model_fund_search",
+                )
+            with ac2:
+                new_pct = st.number_input("% Alvo", min_value=0.01, max_value=100.0, step=0.5, value=1.0, key="add_model_pct")
 
             sel_code = ""
             sel_name = ""
@@ -2095,30 +2099,24 @@ if page == "📂 Importar Dados":
                 sel_code = fund_lookup[selected_fund]["code"]
                 sel_name = fund_lookup[selected_fund]["name"]
 
-            ac1, ac2, ac3 = st.columns([1, 2, 1])
-            new_code = ac1.text_input("Código", value=sel_code, key="add_model_code")
-            new_name = ac2.text_input("Nome do Ativo", value=sel_name, key="add_model_name")
-            new_pct = ac3.number_input("% Alvo", min_value=0.01, max_value=100.0, step=0.5, value=1.0, key="add_model_pct")
+            if selected_fund:
+                st.caption(f"Selecionado: **{sel_name}** (Código: {sel_code})")
 
-            if st.button("Adicionar ao Modelo", type="primary"):
-                if new_pct <= 0:
-                    st.warning("Informe um % Alvo maior que zero.")
-                elif not new_name.strip():
-                    st.warning("Informe o nome do ativo.")
+            if st.button("Adicionar ao Modelo", type="primary", disabled=not selected_fund):
+                if not sel_code:
+                    st.warning("Selecione um ativo na lista acima.")
+                elif sel_code in existing_codes:
+                    st.warning(f"Código {sel_code} já existe no modelo. Altere o % Alvo na tabela acima.")
                 else:
-                    code_clean = new_code.strip()
-                    if code_clean in existing_codes and code_clean:
-                        st.warning(f"Código {code_clean} já existe no modelo. Altere o % Alvo na tabela acima.")
-                    else:
-                        new_row = pd.DataFrame([{
-                            "Código": code_clean,
-                            "Ativo": new_name.strip(),
-                            "% Alvo": new_pct,
-                        }])
-                        st.session_state.model_df = pd.concat(
-                            [st.session_state.model_df, new_row], ignore_index=True
-                        )
-                        st.rerun()
+                    new_row = pd.DataFrame([{
+                        "Código": sel_code,
+                        "Ativo": sel_name,
+                        "% Alvo": new_pct,
+                    }])
+                    st.session_state.model_df = pd.concat(
+                        [st.session_state.model_df, new_row], ignore_index=True
+                    )
+                    st.rerun()
 
             # ── Gráfico ──
             if not model_df.empty:
