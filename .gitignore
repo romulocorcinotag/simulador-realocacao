@@ -16,3 +16,13 @@ logo_tag_clean.png
 logo_tag_transparent.png
 page*.png
 nul
+database/propostas.db
+propostas_html/
+uploads/
+_build_test.py
+_decode_test.py
+_test_b64.txt
+_test_html_charts.py
+_write_helper.py
+C:temp/
+Dados de liquid.xlsx

@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Relatório - Sistema de Propostas TAG Investimentos</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #1A0A10;
+            color: #E6E4DB;
+            line-height: 1.8;
+        }
+        .container { max-width: 960px; margin: 0 auto; padding: 40px 24px; }
+
+        /* Header */
+        .header {
+            text-align: center;
+            padding: 60px 40px;
+            background: linear-gradient(135deg, #3D0816 0%, #1A0A10 70%);
+            border-radius: 16px;
+            margin-bottom: 40px;
+            border: 1px solid #630D2430;
+        }
+        .header h1 {
+            font-size: 2.2rem;
+            font-weight: 700;
+            color: #E6E4DB;
+            margin-bottom: 8px;
+        }
+        .header .subtitle {
+            color: #FF8853;
+            font-size: 1.1rem;
+            font-weight: 500;
+        }
+        .header .date {
+            color: #9A9590;
+            margin-top: 16px;
+            font-size: 0.9rem;
+        }
+        .header .tag-logo {
+            color: #FF8853;
+            font-size: 1.8rem;
+            font-weight: 700;
+            letter-spacing: 0.3em;
+            margin-bottom: 24px;
+        }
+        .header .tag-sub {
+            color: #9A9590;
+            font-size: 0.7rem;
+            letter-spacing: 0.4em;
+            text-transform: uppercase;
+        }
+
+        /* Sections */
+        .section {
+            background: #2A1520;
+            border-radius: 12px;
+            padding: 32px;
+            margin-bottom: 24px;
+            border: 1px solid #630D2420;
+        }
+        .section h2 {
+            color: #FF8853;
+            font-size: 1.3rem;
+            font-weight: 600;
+            margin-bottom: 20px;
+            padding-bottom: 8px;
+            border-bottom: 2px solid #FF885330;
+        }
+        .section h3 {
+            color: #E6E4DB;
+            font-size: 1.05rem;
+            font-weight: 600;
+            margin: 20px 0 10px 0;
+        }
+        .section p { margin-bottom: 12px; }
+        .section ul { margin: 8px 0 16px 24px; }
+        .section li { margin-bottom: 6px; }
+
+        /* Tables */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 16px 0;
+        }
+        th {
+            text-align: left;
+            padding: 12px 16px;
+            background: #3D0816;
+            color: #FF8853;
+            font-weight: 600;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        td {
+            padding: 10px 16px;
+            border-bottom: 1px solid #630D2415;
+            font-size: 0.9rem;
+        }
+        tr:hover td { background: #630D2408; }
+
+        /* Code blocks */
+        .code-block {
+            background: #130810;
+            border: 1px solid #630D2430;
+            border-radius: 8px;
+            padding: 16px 20px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.85rem;
+            color: #6BDE97;
+            overflow-x: auto;
+            margin: 12px 0;
+            white-space: pre;
+            line-height: 1.5;
+        }
+
+        /* Metrics */
+        .metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin: 20px 0;
+        }
+        .metric-card {
+            background: linear-gradient(135deg, #321A28 0%, #2A1520 100%);
+            border-radius: 10px;
+            padding: 20px;
+            border: 1px solid #630D2420;
+            text-align: center;
+        }
+        .metric-card .label {
+            color: #9A9590;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .metric-card .value {
+            color: #FF8853;
+            font-size: 1.8rem;
+            font-weight: 700;
+            margin-top: 4px;
+        }
+        .metric-card .detail {
+            color: #9A9590;
+            font-size: 0.8rem;
+            margin-top: 4px;
+        }
+
+        /* Flow diagram */
+        .flow {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin: 20px 0;
+        }
+        .flow-step {
+            background: #321A28;
+            border: 1px solid #630D2430;
+            border-radius: 8px;
+            padding: 10px 16px;
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
+        .flow-arrow {
+            color: #FF8853;
+            font-size: 1.2rem;
+        }
+
+        /* Badges */
+        .badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        .badge-ai { background: #5C85F720; color: #5C85F7; }
+        .badge-db { background: #6BDE9720; color: #6BDE97; }
+        .badge-ui { background: #FF885320; color: #FF8853; }
+        .badge-engine { background: #FFBB0020; color: #FFBB00; }
+
+        /* Feature grid */
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 16px;
+            margin: 20px 0;
+        }
+        .feature-card {
+            background: #321A28;
+            border-radius: 10px;
+            padding: 20px;
+            border-left: 3px solid #FF8853;
+        }
+        .feature-card h4 {
+            color: #E6E4DB;
+            font-size: 0.95rem;
+            margin-bottom: 8px;
+        }
+        .feature-card p {
+            color: #9A9590;
+            font-size: 0.85rem;
+            margin: 0;
+        }
+
+        /* Footer */
+        .footer {
+            text-align: center;
+            padding: 32px;
+            color: #9A9590;
+            font-size: 0.8rem;
+            border-top: 1px solid #630D2415;
+            margin-top: 40px;
+        }
+
+        /* Highlight */
+        .highlight {
+            color: #FF8853;
+            font-weight: 600;
+        }
+        .highlight-green {
+            color: #6BDE97;
+            font-weight: 600;
+        }
+
+        /* TOC */
+        .toc {
+            background: #321A28;
+            border-radius: 10px;
+            padding: 24px;
+            margin-bottom: 24px;
+            border: 1px solid #630D2420;
+        }
+        .toc h3 { color: #FF8853; margin-bottom: 12px; }
+        .toc a {
+            color: #E6E4DB;
+            text-decoration: none;
+            display: block;
+            padding: 4px 0;
+            font-size: 0.9rem;
+        }
+        .toc a:hover { color: #FF8853; }
+        .toc .num { color: #FF8853; font-weight: 600; margin-right: 8px; }
+
+        @media print {
+            body { background: white; color: #333; }
+            .header { background: #f5f5f5; }
+            .section { background: #fff; border: 1px solid #eee; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+
+        <!-- HEADER -->
+        <div class="header">
+            <div class="tag-logo">TAG</div>
+            <div class="tag-sub">Investimentos</div>
+            <h1 style="margin-top:24px">Sistema de Propostas para Prospects</h1>
+            <div class="subtitle">Relatório Técnico e Funcional</div>
+            <div class="date">Versão 1.0 &middot; 24 de Fevereiro de 2026</div>
+        </div>
+
+        <!-- METRICS OVERVIEW -->
+        <div class="metrics">
+            <div class="metric-card">
+                <div class="label">Linhas de Código</div>
+                <div class="value">4.246</div>
+                <div class="detail">20 arquivos Python</div>
+            </div>
+            <div class="metric-card">
+                <div class="label">Telas do Sistema</div>
+                <div class="value">5</div>
+                <div class="detail">Pipeline, Cadastro, Carteira, IA, Proposta</div>
+            </div>
+            <div class="metric-card">
+                <div class="label">Base de Fundos</div>
+                <div class="value">2.430</div>
+                <div class="detail">Com dados de liquidação</div>
+            </div>
+            <div class="metric-card">
+                <div class="label">Integração IA</div>
+                <div class="value">3</div>
+                <div class="detail">Diagnóstico, Recomendação, Textos</div>
+            </div>
+        </div>
+
+        <!-- TOC -->
+        <div class="toc">
+            <h3>Sumário</h3>
+            <a href="#visao"><span class="num">1.</span> Visão Geral</a>
+            <a href="#tech"><span class="num">2.</span> Tecnologias Utilizadas</a>
+            <a href="#arch"><span class="num">3.</span> Arquitetura de Arquivos</a>
+            <a href="#telas"><span class="num">4.</span> Funcionalidades por Tela</a>
+            <a href="#db"><span class="num">5.</span> Banco de Dados</a>
+            <a href="#ia"><span class="num">6.</span> Integração com IA</a>
+            <a href="#motor"><span class="num">7.</span> Motor de Realocação</a>
+            <a href="#uso"><span class="num">8.</span> Como Usar</a>
+            <a href="#seguranca"><span class="num">9.</span> Segurança</a>
+            <a href="#proximos"><span class="num">10.</span> Próximos Passos</a>
+        </div>
+
+        <!-- 1. VISÃO GERAL -->
+        <div class="section" id="visao">
+            <h2>1. Visão Geral</h2>
+            <p>Foi desenvolvido um sistema completo de geração de propostas para clientes prospects da TAG Investimentos. O sistema automatiza o fluxo que hoje é manual em uma plataforma integrada com inteligência artificial.</p>
+
+            <h3>Fluxo Anterior (Manual)</h3>
+            <div class="flow">
+                <div class="flow-step">Comercial coleta dados</div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">Envia para Gestão</div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">Gestão monta proposta</div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">Envia ao cliente</div>
+            </div>
+
+            <h3>Fluxo Novo (Automatizado)</h3>
+            <div class="flow">
+                <div class="flow-step" style="border-color:#FF8853">Comercial cadastra no sistema</div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step" style="border-color:#5C85F7">IA analisa e gera proposta</div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step" style="border-color:#6BDE97">Gestão revisa</div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step" style="border-color:#FFBB00">Cliente recebe link</div>
+            </div>
+        </div>
+
+        <!-- 2. TECNOLOGIAS -->
+        <div class="section" id="tech">
+            <h2>2. Tecnologias Utilizadas</h2>
+            <table>
+                <thead>
+                    <tr><th>Tecnologia</th><th>Uso</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td><span class="highlight">Python 3.10</span></td><td>Linguagem principal</td></tr>
+                    <tr><td><span class="highlight">Streamlit</span></td><td>Interface web (frontend + backend)</td></tr>
+                    <tr><td><span class="highlight">SQLite</span></td><td>Banco de dados local (propostas.db)</td></tr>
+                    <tr><td><span class="highlight">Claude API (Anthropic)</span></td><td>Inteligência artificial para diagnóstico e recomendação</td></tr>
+                    <tr><td><span class="highlight">Plotly</span></td><td>Gráficos interativos (donuts, barras, cenários)</td></tr>
+                    <tr><td><span class="highlight">Pandas</span></td><td>Manipulação e análise de dados</td></tr>
+                    <tr><td><span class="highlight">python-dotenv</span></td><td>Gerenciamento seguro de API keys</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- 3. ARQUITETURA -->
+        <div class="section" id="arch">
+            <h2>3. Arquitetura de Arquivos</h2>
+            <div class="code-block">Simulador de realocação/
+├── proposta_app.py              &larr; ENTRY POINT
+├── app.py                       &larr; Simulador existente (inalterado)
+├── .env                         &larr; API Key
+│
+├── shared/                      (1.486 linhas)
+│   ├── brand.py                 Identidade visual TAG
+│   ├── date_utils.py            Cálculos de dias úteis
+│   ├── fund_utils.py            Match de fundos + liquidação
+│   ├── portfolio_utils.py       Parser de carteiras + cash flow
+│   └── rebalancing.py           Motor de realocação (5 fases)
+│
+├── database/                    (465 linhas)
+│   ├── db.py                    Schema SQLite
+│   ├── models.py                CRUD + estatísticas
+│   └── propostas.db             Banco de dados
+│
+├── ai/                          (375 linhas)
+│   ├── client.py                Wrapper Claude API
+│   ├── diagnostico.py           Diagnóstico com IA
+│   └── recomendacao.py          Recomendação personalizada
+│
+├── proposal_gen/                (438 linhas)
+│   ├── charts.py                Gráficos Plotly
+│   └── html_generator.py        HTML premium
+│
+├── pages_proposta/              (1.362 linhas)
+│   ├── p1_cadastro.py           Cadastro do Prospect
+│   ├── p2_carteira_atual.py     Carteira + Diagnóstico
+│   ├── p3_proposta_ia.py        Proposta com IA
+│   ├── p4_visualizar.py         Preview + Export
+│   └── p5_pipeline.py           Pipeline/CRM
+│
+├── modelos_carteira/            Carteiras modelo (Excel)
+├── propostas_html/              Propostas geradas
+└── Dados de liquid.xlsx         2.430 fundos</div>
+        </div>
+
+        <!-- 4. TELAS -->
+        <div class="section" id="telas">
+            <h2>4. Funcionalidades por Tela</h2>
+
+            <div class="feature-grid">
+                <div class="feature-card">
+                    <h4>📊 Pipeline / CRM</h4>
+                    <p>Kanban visual com 5 colunas (Lead &rarr; Cliente). Métricas do funil, busca, filtros, registro de interações e próximas ações.</p>
+                </div>
+                <div class="feature-card">
+                    <h4>👤 Cadastro de Prospect</h4>
+                    <p>Formulário completo: dados pessoais, perfil, patrimônio, objetivos, horizonte, retirada mensal, restrições (7 predefinidas + texto livre).</p>
+                </div>
+                <div class="feature-card">
+                    <h4>💼 Carteira Atual</h4>
+                    <p>Upload Excel ou manual. Diagnóstico automático: HHI, top 3, liquidez (D+0 a D+30+), alocação por estratégia. Gráficos donut e barras.</p>
+                </div>
+                <div class="feature-card">
+                    <h4>🤖 Proposta com IA</h4>
+                    <p>Claude analisa perfil + restrições, gera diagnóstico profissional, seleciona modelo, cria carteira personalizada. Editável pela gestão.</p>
+                </div>
+                <div class="feature-card">
+                    <h4>📄 Visualizar Proposta</h4>
+                    <p>Preview completo com capa, métricas, diagnóstico, comparativo visual, recomendação, tabela. Export HTML premium com dark theme TAG.</p>
+                </div>
+                <div class="feature-card">
+                    <h4>🔄 Motor de Realocação</h4>
+                    <p>Algoritmo de 5 fases que garante caixa nunca negativo. 2.430 fundos com D+. Reutilizado do simulador existente.</p>
+                </div>
+            </div>
+
+            <h3>Detalhamento: Campos do Cadastro</h3>
+            <table>
+                <thead><tr><th>Seção</th><th>Campos</th></tr></thead>
+                <tbody>
+                    <tr><td>Dados Pessoais</td><td>Nome, CPF/CNPJ, Email, Telefone, Tipo (PF/PJ), Responsável</td></tr>
+                    <tr><td>Perfil</td><td>Conservador/Moderado/Arrojado/Agressivo, Patrimônio Total, Patrimônio Investível, Horizonte, Retirada Mensal</td></tr>
+                    <tr><td>Objetivos</td><td>Preservação, Renda, Crescimento, Liquidez, Proteção Cambial, Sucessório, Diversificação</td></tr>
+                    <tr><td>Restrições</td><td>Não vender RF, Sem cripto, Só ESG, Sem RV, Sem exterior, Sem crédito privado, Manter previdência + Texto livre</td></tr>
+                    <tr><td>Pipeline</td><td>Status (Lead &rarr; Cliente), Observações</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- 5. BANCO DE DADOS -->
+        <div class="section" id="db">
+            <h2>5. Banco de Dados</h2>
+            <p>O sistema utiliza <span class="highlight">SQLite</span> com 3 tabelas principais:</p>
+
+            <h3><span class="badge badge-db">prospects</span> Cadastro de Prospects</h3>
+            <p>22 campos incluindo dados pessoais, perfil, patrimônio, objetivos (JSON), restrições (JSON), carteira (JSON), status do pipeline, timestamps.</p>
+
+            <h3><span class="badge badge-db">propostas</span> Propostas Geradas</h3>
+            <p>Cada proposta com: versão, modelo usado, textos da IA (diagnóstico + recomendação), carteira proposta (JSON), plano de transição, cenários, status, link de compartilhamento.</p>
+
+            <h3><span class="badge badge-db">interacoes</span> Histórico de Interações</h3>
+            <p>Registro de reuniões, ligações, emails, WhatsApp com descrição, responsável, próxima ação e data.</p>
+        </div>
+
+        <!-- 6. IA -->
+        <div class="section" id="ia">
+            <h2>6. Integração com IA (Claude API)</h2>
+
+            <table>
+                <thead><tr><th>Módulo</th><th>Input</th><th>Output</th></tr></thead>
+                <tbody>
+                    <tr>
+                        <td><span class="badge badge-ai">Diagnóstico</span></td>
+                        <td>Perfil + carteira + métricas (HHI, liquidez, concentração)</td>
+                        <td>Texto profissional: visão geral, pontos de atenção, oportunidades, recomendação</td>
+                    </tr>
+                    <tr>
+                        <td><span class="badge badge-ai">Recomendação</span></td>
+                        <td>Perfil + restrições + modelo base + carteira atual</td>
+                        <td>JSON: carteira proposta personalizada + justificativa por mudança</td>
+                    </tr>
+                    <tr>
+                        <td><span class="badge badge-ai">Texto</span></td>
+                        <td>Diagnóstico + proposta + dados consolidados</td>
+                        <td>Texto profissional para cada seção da proposta</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <p style="margin-top:16px"><strong>Modelo:</strong> Claude Sonnet (claude-sonnet-4-20250514)</p>
+            <p><strong>Custo estimado:</strong> R$ 0,05 a R$ 0,15 por proposta</p>
+            <p><strong>Fallback:</strong> Sem API Key, diagnósticos básicos (numéricos) funcionam normalmente</p>
+        </div>
+
+        <!-- 7. MOTOR -->
+        <div class="section" id="motor">
+            <h2>7. Motor de Realocação (Reutilizado)</h2>
+            <p>O sistema reutiliza o motor inteligente do Simulador de Realocação existente (443 linhas):</p>
+            <ul>
+                <li><strong>Fase 0:</strong> Catálogo de fundos com gap analysis</li>
+                <li><strong>Fase 1:</strong> Mapeamento de eventos de caixa</li>
+                <li><strong>Fase 2:</strong> Cobertura de passivos (resgates de investidores)</li>
+                <li><strong>Fase 3:</strong> Rebalanceamento de posições acima do modelo</li>
+                <li><strong>Fase 4:</strong> Aplicações em posições abaixo do modelo (quando caixa permite)</li>
+                <li><strong>Fase 5:</strong> Validação dia-a-dia (garante caixa nunca negativo)</li>
+            </ul>
+            <p style="margin-top:12px">Base de <span class="highlight">2.430 fundos brasileiros</span> com dados de conversão e liquidação (D+).</p>
+        </div>
+
+        <!-- 8. COMO USAR -->
+        <div class="section" id="uso">
+            <h2>8. Como Usar</h2>
+
+            <h3>Primeiro Uso</h3>
+            <div class="code-block">cd "G:\Drives compartilhados\Gestao_AI\Simulador de realocação"
+pip install -r requirements.txt
+streamlit run proposta_app.py</div>
+
+            <h3>Fluxo Recomendado</h3>
+            <div class="flow">
+                <div class="flow-step">1. Pipeline</div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">2. Cadastro</div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">3. Carteira</div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">4. IA Proposta</div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">5. Visualizar</div>
+            </div>
+
+            <h3>Carteiras Modelo</h3>
+            <p>Salvar arquivos Excel em <code>modelos_carteira/</code> com colunas: <span class="highlight">Código</span>, <span class="highlight">Ativo</span>, <span class="highlight">% Alvo</span></p>
+        </div>
+
+        <!-- 9. SEGURANÇA -->
+        <div class="section" id="seguranca">
+            <h2>9. Segurança</h2>
+            <ul>
+                <li>API Key armazenada em <code>.env</code> (no <code>.gitignore</code>, nunca commitada)</li>
+                <li>Banco SQLite local (não exposto na internet)</li>
+                <li>Propostas HTML são arquivos estáticos independentes</li>
+                <li>Simulador original (app.py) permanece inalterado</li>
+            </ul>
+        </div>
+
+        <!-- 10. PRÓXIMOS PASSOS -->
+        <div class="section" id="proximos">
+            <h2>10. Próximos Passos Sugeridos</h2>
+            <div class="feature-grid">
+                <div class="feature-card" style="border-left-color:#6BDE97">
+                    <h4>Carteiras Modelo Reais</h4>
+                    <p>Salvar as carteiras modelo oficiais da TAG por perfil em modelos_carteira/</p>
+                </div>
+                <div class="feature-card" style="border-left-color:#5C85F7">
+                    <h4>Geração de PDF</h4>
+                    <p>Adicionar export em PDF com reportlab para envio formal</p>
+                </div>
+                <div class="feature-card" style="border-left-color:#FFBB00">
+                    <h4>Cenários de Projeção</h4>
+                    <p>Simulação Monte Carlo (otimista/base/pessimista) na proposta</p>
+                </div>
+                <div class="feature-card" style="border-left-color:#ED5A6E">
+                    <h4>Plano de Transição</h4>
+                    <p>Cronograma Gantt integrado mostrando a migração dia-a-dia</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- FOOTER -->
+        <div class="footer">
+            <div style="color:#FF8853;font-size:1.2rem;font-weight:700;letter-spacing:0.2em;margin-bottom:8px">TAG</div>
+            <p>TAG Investimentos &copy; 2026 &middot; Sistema de Propostas v1.0</p>
+            <p style="margin-top:8px">Documento interno e confidencial</p>
+        </div>
+
+    </div>
+</body>
+</html>
