@@ -18,6 +18,10 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ── SSO Authentication Guard ──
+from sso_auth import require_sso
+sso_user = require_sso()
+
 DADOS_LIQUID_PATH = os.path.join(os.path.dirname(__file__), "Dados de liquid.xlsx")
 
 # ─────────────────────────────────────────────────────────
